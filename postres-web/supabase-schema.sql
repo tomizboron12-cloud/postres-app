@@ -10,7 +10,7 @@ create table if not exists owners (
   id text primary key,
   name text not null
 );
-insert into owners (id, name) values ('ella','Vos'), ('mama','Mamá')
+insert into owners (id, name) values ('ella','Sofi'), ('mama','Mamá')
   on conflict (id) do nothing;
 
 -- Productos / postres
