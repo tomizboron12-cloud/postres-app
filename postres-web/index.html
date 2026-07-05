@@ -91,8 +91,8 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--frutilla);outlin
   .mobile-topbar .user-pill{font-size:12px;font-weight:700;color:#d8c9bb;display:flex;align-items:center;gap:8px}
   .mobile-topbar .logout-icon{background:none;border:none;color:#d8c9bb;display:flex;padding:4px}
   .main{padding:68px 14px 86px;max-width:100%}
-  .bottomnav{display:flex;position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);z-index:60;padding:4px 2px env(safe-area-inset-bottom,4px)}
-  .bottomnav button{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;color:var(--chocoSoft);font-size:10.5px;font-weight:700;padding:6px 2px;position:relative}
+  .bottomnav{display:flex;position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);z-index:60;padding:4px 2px env(safe-area-inset-bottom,4px);overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .bottomnav button{flex:0 0 auto;min-width:64px;display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;color:var(--chocoSoft);font-size:10.5px;font-weight:700;padding:6px 8px;position:relative}
   .bottomnav button.active{color:var(--frutilla)}
   .bottomnav .dot{position:absolute;top:2px;right:22%;width:7px;height:7px;border-radius:50%;background:var(--frutilla)}
   .statgrid{flex-direction:column}
@@ -142,7 +142,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 const CURRENT_USER_KEY = 'postres-current-user';
 
 /* ===================== ESTADO GLOBAL ===================== */
-let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'} };
+let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[] };
 let TAB = 'dashboard';
 let MODAL = null;
 let SEARCH_Q = '';
@@ -155,13 +155,17 @@ function currentUser(){ return localStorage.getItem(CURRENT_USER_KEY); }
 
 /* ===================== CARGA DE DATOS (SUPABASE) ===================== */
 async function loadAll(){
-  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR] = await Promise.all([
+  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR] = await Promise.all([
     sb.from('owners').select('*').order('id'),
     sb.from('products').select('*').order('created_at'),
     sb.from('clients').select('*').order('name'),
     sb.from('sales').select('*, sale_items(*)').order('date', {ascending:false}),
     sb.from('purchases').select('*').order('date', {ascending:false}),
     sb.from('loyalty_config').select('*').eq('id',1).maybeSingle(),
+    sb.from('ingredients').select('*').order('name'),
+    sb.from('recipes').select('*, recipe_items(*)').order('name'),
+    sb.from('packaging_catalog').select('*').order('name'),
+    sb.from('cost_products').select('*, cost_product_ingredients(*), cost_product_recipes(*), cost_product_packaging(*)').order('name'),
   ]);
   if(ownersR.data) DATA.owners = ownersR.data.map(o=>({id:o.id, name:o.name}));
   if(productsR.data) DATA.products = productsR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, price:+p.price, ownerId:p.owner_id, trackStock:p.track_stock, stock:p.stock, lowStockAlert:p.low_stock_alert}));
@@ -172,6 +176,18 @@ async function loadAll(){
   }));
   if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category}));
   if(loyaltyR.data) DATA.loyalty = {threshold:loyaltyR.data.threshold, reward:loyaltyR.data.reward};
+  if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, packageQty:+i.package_qty, unit:i.unit}));
+  if(recipesR.data) DATA.recipes = recipesR.data.map(r=>({
+    id:r.id, name:r.name, yieldQty:+r.yield_qty, yieldUnit:r.yield_unit,
+    items:(r.recipe_items||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty}))
+  }));
+  if(packagingR.data) DATA.packagingCatalog = packagingR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost}));
+  if(costProductsR.data) DATA.costProducts = costProductsR.data.map(cp=>({
+    id:cp.id, name:cp.name,
+    directIngredients:(cp.cost_product_ingredients||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty})),
+    recipesUsed:(cp.cost_product_recipes||[]).map(it=>({recipeId:it.recipe_id, qty:+it.qty})),
+    packagingIds:(cp.cost_product_packaging||[]).map(it=>it.packaging_id),
+  }));
   LOADED = true;
 }
 
@@ -182,7 +198,8 @@ function scheduleReload(){
 }
 function subscribeRealtime(){
   const channel = sb.channel('postres-sync');
-  ['products','clients','sales','sale_items','purchases','loyalty_config','owners'].forEach(table => {
+  ['products','clients','sales','sale_items','purchases','loyalty_config','owners',
+   'ingredients','recipes','recipe_items','packaging_catalog','cost_products','cost_product_ingredients','cost_product_recipes','cost_product_packaging'].forEach(table => {
     channel.on('postgres_changes', {event:'*', schema:'public', table}, scheduleReload);
   });
   channel.subscribe();
@@ -217,6 +234,45 @@ function computeMetrics(){
   return byMonth;
 }
 
+/* ===================== CALCULADORA DE COSTOS (helpers) ===================== */
+function ingredientCostPerUnit(ing){
+  if(!ing || !ing.packageQty) return 0;
+  return ing.price / ing.packageQty;
+}
+function ingredientMap(){ return Object.fromEntries(DATA.ingredients.map(i=>[i.id,i])); }
+function recipeMap(){ return Object.fromEntries(DATA.recipes.map(r=>[r.id,r])); }
+function packagingMap(){ return Object.fromEntries(DATA.packagingCatalog.map(p=>[p.id,p])); }
+
+function recipeCostTotal(recipe){
+  const iMap = ingredientMap();
+  return (recipe.items||[]).reduce((a,it) => {
+    const ing = iMap[it.ingredientId];
+    return a + (ing ? ingredientCostPerUnit(ing) * it.qty : 0);
+  }, 0);
+}
+function recipeCostPerUnit(recipe){
+  const total = recipeCostTotal(recipe);
+  if(!recipe.yieldQty) return 0;
+  return total / recipe.yieldQty;
+}
+function costProductBreakdown(cp){
+  const iMap = ingredientMap(), rMap = recipeMap(), pMap = packagingMap();
+  const directTotal = (cp.directIngredients||[]).reduce((a,it) => {
+    const ing = iMap[it.ingredientId];
+    return a + (ing ? ingredientCostPerUnit(ing) * it.qty : 0);
+  }, 0);
+  const recipesTotal = (cp.recipesUsed||[]).reduce((a,it) => {
+    const r = rMap[it.recipeId];
+    return a + (r ? recipeCostPerUnit(r) * it.qty : 0);
+  }, 0);
+  const packagingTotal = (cp.packagingIds||[]).reduce((a,pid) => {
+    const p = pMap[pid];
+    return a + (p ? p.cost : 0);
+  }, 0);
+  return { directTotal, recipesTotal, packagingTotal, total: directTotal + recipesTotal + packagingTotal };
+}
+const UNIT_LABEL = { g:'g', ml:'ml', unidades:'unidades' };
+
 /* ===================== RENDER RAÍZ ===================== */
 const NAV = [
   {id:'dashboard', label:'Resumen', icon:ICONS.trending},
@@ -224,6 +280,9 @@ const NAV = [
   {id:'products', label:'Postres', icon:ICONS.cake},
   {id:'clients', label:'Clientes', icon:ICONS.users},
   {id:'purchases', label:'Gastos', icon:ICONS.dollar},
+  {id:'ingredients', label:'Ingredientes', icon:ICONS.package},
+  {id:'recipes', label:'Recetas', icon:ICONS.edit},
+  {id:'costing', label:'Costeo', icon:ICONS.gift},
 ];
 
 function render(){
@@ -285,6 +344,9 @@ function render(){
   if(TAB==='products') main.innerHTML = renderProducts();
   if(TAB==='clients') main.innerHTML = renderClients();
   if(TAB==='purchases') main.innerHTML = renderPurchases();
+  if(TAB==='ingredients') main.innerHTML = renderIngredients();
+  if(TAB==='recipes') main.innerHTML = renderRecipes();
+  if(TAB==='costing') main.innerHTML = renderCosting();
 
   attachTabEvents();
   renderModal();
@@ -641,6 +703,159 @@ function renderPurchases(){
   `;
 }
 
+/* ===================== INGREDIENTES ===================== */
+function renderIngredients(){
+  return `
+    <div class="header-row">
+      <div><div class="header-title serif">Ingredientes</div><div class="header-sub">La base de todo — cargá cada ingrediente una vez y se actualiza en cadena</div></div>
+      <button class="btn btn-primary" data-open-modal="newIngredient">${ICONS.plus} Nuevo ingrediente</button>
+    </div>
+    ${DATA.ingredients.length===0 ? `<div class="card"><div class="empty">Todavía no cargaste ingredientes.</div></div>` : `
+      <div class="grid-cards">
+        ${DATA.ingredients.map(ing => {
+          const costUnit = ingredientCostPerUnit(ing);
+          return `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div style="font-weight:700;font-size:16px">${esc(ing.name)}</div>
+                <div style="display:flex;gap:4px">
+                  <button class="btn-icon" data-edit-ingredient="${ing.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
+                  <button class="btn-icon" data-remove-ingredient="${ing.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+                </div>
+              </div>
+              <div class="num" style="margin-top:10px;font-size:13.5px">
+                <div class="row"><span class="row-label">Precio pagado</span><span class="row-value">${money(ing.price)}</span></div>
+                <div class="row"><span class="row-label">Cantidad del envase</span><span class="row-value">${ing.packageQty} ${UNIT_LABEL[ing.unit]}</span></div>
+                <div class="row"><span class="row-label">Costo por ${UNIT_LABEL[ing.unit]}</span><span class="row-value bold" style="color:${COLORS.menta}">${money(costUnit)}</span></div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `}
+  `;
+}
+async function removeIngredient(id){
+  const usedInRecipes = DATA.recipes.filter(r => (r.items||[]).some(it=>it.ingredientId===id));
+  const usedInProducts = DATA.costProducts.filter(cp => (cp.directIngredients||[]).some(it=>it.ingredientId===id));
+  if(usedInRecipes.length || usedInProducts.length){
+    if(!confirm(`Este ingrediente se usa en ${usedInRecipes.length} receta(s) y ${usedInProducts.length} postre(s). Si lo borrás, esas cuentas van a dejar de sumarlo. ¿Continuar?`)) return;
+  } else if(!confirm('¿Eliminar este ingrediente?')) return;
+  const { error } = await sb.from('ingredients').delete().eq('id', id);
+  if(error){ alert('Error al eliminar: ' + error.message); return; }
+  await loadAll(); render();
+}
+
+/* ===================== RECETAS ===================== */
+function renderRecipes(){
+  return `
+    <div class="header-row">
+      <div><div class="header-title serif">Recetas</div><div class="header-sub">Preparaciones como mermelada, cremas, bases — se arman con ingredientes de la base</div></div>
+      <button class="btn btn-primary" data-open-modal="newRecipe" ${DATA.ingredients.length===0?'disabled title="Cargá ingredientes primero"':''}>${ICONS.plus} Nueva receta</button>
+    </div>
+    ${DATA.ingredients.length===0 ? `<div class="card"><div class="empty">Primero cargá algunos ingredientes en la sección Ingredientes.</div></div>` : ''}
+    ${DATA.recipes.length===0 ? `<div class="card"><div class="empty">Todavía no cargaste recetas.</div></div>` : `
+      <div class="grid-cards">
+        ${DATA.recipes.map(r => {
+          const total = recipeCostTotal(r);
+          const perUnit = recipeCostPerUnit(r);
+          return `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div style="font-weight:700;font-size:16px">${esc(r.name)}</div>
+                <div style="display:flex;gap:4px">
+                  <button class="btn-icon" data-edit-recipe="${r.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
+                  <button class="btn-icon" data-remove-recipe="${r.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+                </div>
+              </div>
+              <div style="font-size:12.5px;color:var(--chocoSoft);margin-top:4px">${(r.items||[]).length} ingrediente(s) · rinde ${r.yieldQty} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit}</div>
+              <div class="num" style="margin-top:10px;font-size:13.5px">
+                <div class="row"><span class="row-label">Costo total</span><span class="row-value bold">${money(total)}</span></div>
+                <div class="row"><span class="row-label">Costo por ${r.yieldUnit==='porciones'?'porción':(UNIT_LABEL[r.yieldUnit]||r.yieldUnit)}</span><span class="row-value" style="color:${COLORS.menta}">${money(perUnit)}</span></div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `}
+  `;
+}
+async function removeRecipe(id){
+  const usedInProducts = DATA.costProducts.filter(cp => (cp.recipesUsed||[]).some(it=>it.recipeId===id));
+  if(usedInProducts.length && !confirm(`Esta receta se usa en ${usedInProducts.length} postre(s). Si la borrás, esos costos van a dejar de sumarla. ¿Continuar?`)) return;
+  if(!usedInProducts.length && !confirm('¿Eliminar esta receta?')) return;
+  const { error } = await sb.from('recipes').delete().eq('id', id);
+  if(error){ alert('Error al eliminar: ' + error.message); return; }
+  await loadAll(); render();
+}
+
+/* ===================== COSTEO DE POSTRES ===================== */
+function renderCosting(){
+  return `
+    <div class="header-row">
+      <div><div class="header-title serif">Costeo de postres</div><div class="header-sub">El costo final se arma solo a partir de ingredientes, recetas y packaging</div></div>
+      <button class="btn btn-primary" data-open-modal="newCostProduct">${ICONS.plus} Nuevo postre</button>
+    </div>
+
+    <div class="card" style="margin-bottom:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <div class="serif" style="font-weight:700;font-size:16px">Packaging (catálogo)</div>
+        <button class="btn btn-ghost" data-open-modal="newPackagingItem">${ICONS.plus} Nuevo packaging</button>
+      </div>
+      ${DATA.packagingCatalog.length===0 ? `<div class="empty" style="padding:8px 0">Todavía no cargaste ítems de packaging.</div>` :
+        DATA.packagingCatalog.map(p => `
+          <div class="row" style="font-size:13.5px">
+            <span class="row-label">${esc(p.name)}</span>
+            <span style="display:flex;align-items:center;gap:10px">
+              <span class="row-value num">${money(p.cost)}</span>
+              <button class="btn-icon" data-remove-packaging="${p.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+            </span>
+          </div>
+        `).join('')
+      }
+    </div>
+
+    ${DATA.costProducts.length===0 ? `<div class="card"><div class="empty">Todavía no armaste el costeo de ningún postre.</div></div>` : `
+      <div class="grid-cards">
+        ${DATA.costProducts.map(cp => {
+          const b = costProductBreakdown(cp);
+          return `
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div style="font-weight:700;font-size:16px">${esc(cp.name)}</div>
+                <div style="display:flex;gap:4px">
+                  <button class="btn-icon" data-edit-costproduct="${cp.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
+                  <button class="btn-icon" data-remove-costproduct="${cp.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+                </div>
+              </div>
+              <div class="num" style="margin-top:10px;font-size:13.5px">
+                <div class="row"><span class="row-label">Ingredientes directos</span><span class="row-value">${money(b.directTotal)}</span></div>
+                <div class="row"><span class="row-label">Recetas</span><span class="row-value">${money(b.recipesTotal)}</span></div>
+                <div class="row"><span class="row-label">Packaging</span><span class="row-value">${money(b.packagingTotal)}</span></div>
+                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:8px"><span class="row-label" style="font-weight:700">Costo total</span><span class="row-value bold" style="color:${COLORS.menta};font-size:15px">${money(b.total)}</span></div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `}
+  `;
+}
+async function removeCostProduct(id){
+  if(!confirm('¿Eliminar este costeo?')) return;
+  const { error } = await sb.from('cost_products').delete().eq('id', id);
+  if(error){ alert('Error al eliminar: ' + error.message); return; }
+  await loadAll(); render();
+}
+async function removePackagingItem(id){
+  const used = DATA.costProducts.filter(cp => (cp.packagingIds||[]).includes(id));
+  if(used.length && !confirm(`Este packaging se usa en ${used.length} postre(s). ¿Eliminarlo igual?`)) return;
+  if(!used.length && !confirm('¿Eliminar este packaging?')) return;
+  const { error } = await sb.from('packaging_catalog').delete().eq('id', id);
+  if(error){ alert('Error al eliminar: ' + error.message); return; }
+  await loadAll(); render();
+}
+
 /* ===================== EVENTOS DE TAB ===================== */
 function attachTabEvents(){
   document.querySelectorAll('[data-open-modal]').forEach(b => b.onclick = () => { MODAL = { type: b.dataset.openModal }; renderModal(); });
@@ -655,6 +870,13 @@ function attachTabEvents(){
     if(error){ alert('Error: '+error.message); return; }
     await loadAll(); render();
   });
+  document.querySelectorAll('[data-edit-ingredient]').forEach(b => b.onclick = () => { MODAL = { type:'newIngredient', payload: DATA.ingredients.find(i=>i.id===b.dataset.editIngredient) }; renderModal(); });
+  document.querySelectorAll('[data-remove-ingredient]').forEach(b => b.onclick = () => removeIngredient(b.dataset.removeIngredient));
+  document.querySelectorAll('[data-edit-recipe]').forEach(b => b.onclick = () => { MODAL = { type:'newRecipe', payload: DATA.recipes.find(r=>r.id===b.dataset.editRecipe) }; renderModal(); });
+  document.querySelectorAll('[data-remove-recipe]').forEach(b => b.onclick = () => removeRecipe(b.dataset.removeRecipe));
+  document.querySelectorAll('[data-edit-costproduct]').forEach(b => b.onclick = () => { MODAL = { type:'newCostProduct', payload: DATA.costProducts.find(cp=>cp.id===b.dataset.editCostproduct) }; renderModal(); });
+  document.querySelectorAll('[data-remove-costproduct]').forEach(b => b.onclick = () => removeCostProduct(b.dataset.removeCostproduct));
+  document.querySelectorAll('[data-remove-packaging]').forEach(b => b.onclick = () => removePackagingItem(b.dataset.removePackaging));
   const searchEl = document.getElementById('sale-search');
   if(searchEl){ searchEl.oninput = () => { SEARCH_Q = searchEl.value; const main = document.getElementById('main'); main.innerHTML = renderSales(); attachTabEvents(); searchEl.focus(); const v=searchEl.value; searchEl.value=''; searchEl.value=v; }; }
 }
@@ -673,8 +895,13 @@ function renderModal(){
   if(MODAL.type==='newClient') inner = clientModalHtml(MODAL.payload);
   if(MODAL.type==='newPurchase') inner = purchaseModalHtml();
   if(MODAL.type==='loyalty') inner = loyaltyModalHtml();
+  if(MODAL.type==='newIngredient') inner = ingredientModalHtml(MODAL.payload);
+  if(MODAL.type==='newRecipe') inner = recipeModalHtml(MODAL.payload);
+  if(MODAL.type==='newPackagingItem') inner = packagingItemModalHtml();
+  if(MODAL.type==='newCostProduct') inner = costProductModalHtml(MODAL.payload);
 
-  host.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-box">${inner}</div></div>`;
+  const wide = MODAL.type==='newRecipe' || MODAL.type==='newCostProduct';
+  host.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-box" style="${wide?'width:560px':''}">${inner}</div></div>`;
   document.getElementById('modal-overlay').onclick = (e) => { if(e.target.id==='modal-overlay') closeModal(); };
   document.getElementById('modal-box').onclick = (e) => e.stopPropagation();
   const closeBtn = document.getElementById('modal-close'); if(closeBtn) closeBtn.onclick = closeModal;
@@ -685,6 +912,10 @@ function renderModal(){
   if(MODAL.type==='newClient') attachClientModalEvents(MODAL.payload);
   if(MODAL.type==='newPurchase') attachPurchaseModalEvents();
   if(MODAL.type==='loyalty') attachLoyaltyModalEvents();
+  if(MODAL.type==='newIngredient') attachIngredientModalEvents(MODAL.payload);
+  if(MODAL.type==='newRecipe') attachRecipeModalEvents(MODAL.payload);
+  if(MODAL.type==='newPackagingItem') attachPackagingItemModalEvents();
+  if(MODAL.type==='newCostProduct') attachCostProductModalEvents(MODAL.payload);
 }
 
 function modalHeader(title){
@@ -994,6 +1225,307 @@ function attachPurchaseModalEvents(){
     await loadAll();
     closeModal();
   };
+}
+
+/* ---- Ingrediente ---- */
+function ingredientModalHtml(editing){
+  return `
+    ${modalHeader(editing?'Editar ingrediente':'Nuevo ingrediente')}
+    <div class="field"><div class="field-label">Nombre</div><input class="input" id="ing-name" value="${esc(editing?.name||'')}" placeholder="Ej: Harina"/></div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Precio pagado</div><input type="number" class="input" id="ing-price" value="${editing?.price ?? ''}"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Cantidad del envase</div><input type="number" class="input" id="ing-qty" value="${editing?.packageQty ?? ''}"/></div>
+    </div>
+    <div class="field"><div class="field-label">Unidad</div>
+      <select class="input" id="ing-unit">
+        <option value="g" ${editing?.unit==='g'?'selected':''}>Gramos (g)</option>
+        <option value="ml" ${editing?.unit==='ml'?'selected':''}>Mililitros (ml)</option>
+        <option value="unidades" ${editing?.unit==='unidades'?'selected':''}>Unidades</option>
+      </select>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="ing-save">Guardar</button>
+    </div>
+  `;
+}
+function attachIngredientModalEvents(editing){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('ing-save').onclick = async () => {
+    const name = document.getElementById('ing-name').value.trim();
+    const price = +document.getElementById('ing-price').value || 0;
+    const packageQty = +document.getElementById('ing-qty').value || 0;
+    const unit = document.getElementById('ing-unit').value;
+    if(!name){ alert('Poné un nombre.'); return; }
+    if(!packageQty){ alert('Poné la cantidad que trae el envase.'); return; }
+    const payload = { name, price, package_qty: packageQty, unit };
+    const { error } = editing
+      ? await sb.from('ingredients').update(payload).eq('id', editing.id)
+      : await sb.from('ingredients').insert(payload);
+    if(error){ alert('Error al guardar: ' + error.message); return; }
+    await loadAll();
+    closeModal();
+  };
+}
+
+/* ---- Receta ---- */
+let RECIPE_ITEMS = [];
+function recipeModalHtml(editing){
+  RECIPE_ITEMS = editing ? structuredClone(editing.items||[]) : [{ ingredientId:'', qty:1 }];
+  return renderRecipeModalBody(editing);
+}
+function renderRecipeModalBody(editing){
+  const iMap = ingredientMap();
+  const total = RECIPE_ITEMS.reduce((a,it) => { const ing = iMap[it.ingredientId]; return a + (ing ? ingredientCostPerUnit(ing)*it.qty : 0); }, 0);
+  return `
+    ${modalHeader(editing?'Editar receta':'Nueva receta')}
+    <div class="field"><div class="field-label">Nombre de la receta</div><input class="input" id="rec-name" value="${esc(editing?.name||'')}" placeholder="Ej: Mermelada"/></div>
+    <div class="field-label" style="margin:10px 0 6px">Ingredientes</div>
+    <div id="rec-items">
+      ${RECIPE_ITEMS.map((row,i) => `
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+          <select class="input rec-item-ing" data-idx="${i}" style="flex:2;min-width:140px">
+            <option value="">Elegir ingrediente...</option>
+            ${DATA.ingredients.map(ing=>`<option value="${ing.id}" ${ing.id===row.ingredientId?'selected':''}>${esc(ing.name)}</option>`).join('')}
+          </select>
+          <input type="number" min="0" step="any" class="input rec-item-qty" data-idx="${i}" value="${row.qty}" style="width:80px" placeholder="cant."/>
+          <span style="font-size:12px;color:var(--chocoSoft);width:34px">${iMap[row.ingredientId]?UNIT_LABEL[iMap[row.ingredientId].unit]:''}</span>
+          ${RECIPE_ITEMS.length>1 ? `<button class="btn-icon rec-item-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>` : ''}
+        </div>
+      `).join('')}
+    </div>
+    <button class="btn btn-ghost" id="rec-add-row" style="margin-bottom:14px">${ICONS.plus} Agregar ingrediente</button>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Rendimiento total</div><input type="number" class="input" id="rec-yield" value="${editing?.yieldQty ?? ''}" placeholder="Ej: 500"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Unidad del rendimiento</div>
+        <select class="input" id="rec-yield-unit">
+          <option value="g" ${editing?.yieldUnit==='g'?'selected':''}>Gramos</option>
+          <option value="ml" ${editing?.yieldUnit==='ml'?'selected':''}>Mililitros</option>
+          <option value="porciones" ${editing?.yieldUnit==='porciones'?'selected':''}>Porciones</option>
+          <option value="unidades" ${editing?.yieldUnit==='unidades'?'selected':''}>Unidades</option>
+        </select>
+      </div>
+    </div>
+    <div class="card" style="background:var(--cream);border:none">
+      <div class="num row" style="font-size:16px;font-weight:800;color:${COLORS.menta}"><span>Costo total de la receta</span><span>${money(total)}</span></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="rec-save">Guardar receta</button>
+    </div>
+  `;
+}
+function attachRecipeModalEvents(editing){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('rec-add-row').onclick = () => { RECIPE_ITEMS.push({ingredientId:'', qty:1}); refreshRecipeModal(editing); };
+  document.querySelectorAll('.rec-item-ing').forEach(el => el.onchange = () => { RECIPE_ITEMS[+el.dataset.idx].ingredientId = el.value; refreshRecipeModal(editing); });
+  document.querySelectorAll('.rec-item-qty').forEach(el => el.onchange = () => { RECIPE_ITEMS[+el.dataset.idx].qty = +el.value || 0; refreshRecipeModal(editing); });
+  document.querySelectorAll('.rec-item-remove').forEach(el => el.onclick = () => { RECIPE_ITEMS.splice(+el.dataset.idx,1); refreshRecipeModal(editing); });
+  document.getElementById('rec-save').onclick = () => saveRecipe(editing);
+}
+function refreshRecipeModal(editing){
+  const name = document.getElementById('rec-name')?.value || '';
+  const yieldQty = document.getElementById('rec-yield')?.value || '';
+  const yieldUnit = document.getElementById('rec-yield-unit')?.value || 'g';
+  document.getElementById('modal-box').innerHTML = renderRecipeModalBody(editing);
+  const closeBtn = document.getElementById('modal-close'); if(closeBtn) closeBtn.onclick = closeModal;
+  document.getElementById('rec-name').value = name;
+  document.getElementById('rec-yield').value = yieldQty;
+  document.getElementById('rec-yield-unit').value = yieldUnit;
+  attachRecipeModalEvents(editing);
+}
+async function saveRecipe(editing){
+  const name = document.getElementById('rec-name').value.trim();
+  const yieldQty = +document.getElementById('rec-yield').value || 0;
+  const yieldUnit = document.getElementById('rec-yield-unit').value;
+  const items = RECIPE_ITEMS.filter(it => it.ingredientId && it.qty>0);
+  if(!name){ alert('Poné un nombre.'); return; }
+  if(!items.length){ alert('Agregá al menos un ingrediente.'); return; }
+  if(!yieldQty){ alert('Indicá el rendimiento total.'); return; }
+  try{
+    let recipeId;
+    if(editing){
+      const { error } = await sb.from('recipes').update({ name, yield_qty: yieldQty, yield_unit: yieldUnit }).eq('id', editing.id);
+      if(error) throw error;
+      recipeId = editing.id;
+      const { error: delErr } = await sb.from('recipe_items').delete().eq('recipe_id', recipeId);
+      if(delErr) throw delErr;
+    } else {
+      const { data, error } = await sb.from('recipes').insert({ name, yield_qty: yieldQty, yield_unit: yieldUnit }).select().single();
+      if(error) throw error;
+      recipeId = data.id;
+    }
+    const rows = items.map(it => ({ recipe_id: recipeId, ingredient_id: it.ingredientId, qty: it.qty }));
+    const { error: itemsErr } = await sb.from('recipe_items').insert(rows);
+    if(itemsErr) throw itemsErr;
+    await loadAll();
+    closeModal();
+  } catch(e){
+    alert('Error al guardar la receta: ' + e.message);
+  }
+}
+
+/* ---- Packaging (catálogo) ---- */
+function packagingItemModalHtml(){
+  return `
+    ${modalHeader('Nuevo packaging')}
+    <div class="field"><div class="field-label">Nombre</div><input class="input" id="pk-name" placeholder="Ej: Caja individual"/></div>
+    <div class="field"><div class="field-label">Costo</div><input type="number" class="input" id="pk-cost"/></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="pk-save">Guardar</button>
+    </div>
+  `;
+}
+function attachPackagingItemModalEvents(){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('pk-save').onclick = async () => {
+    const name = document.getElementById('pk-name').value.trim();
+    const cost = +document.getElementById('pk-cost').value || 0;
+    if(!name){ alert('Poné un nombre.'); return; }
+    const { error } = await sb.from('packaging_catalog').insert({ name, cost });
+    if(error){ alert('Error al guardar: ' + error.message); return; }
+    await loadAll();
+    closeModal();
+  };
+}
+
+/* ---- Costeo de un postre (ingredientes directos + recetas + packaging) ---- */
+let CP_DIRECT = [];
+let CP_RECIPES = [];
+let CP_PACKAGING = [];
+function costProductModalHtml(editing){
+  CP_DIRECT = editing ? structuredClone(editing.directIngredients||[]) : [];
+  CP_RECIPES = editing ? structuredClone(editing.recipesUsed||[]) : [];
+  CP_PACKAGING = editing ? structuredClone(editing.packagingIds||[]) : [];
+  return renderCostProductModalBody(editing);
+}
+function renderCostProductModalBody(editing){
+  const iMap = ingredientMap(), rMap = recipeMap();
+  const directTotal = CP_DIRECT.reduce((a,it) => { const ing=iMap[it.ingredientId]; return a + (ing?ingredientCostPerUnit(ing)*it.qty:0); }, 0);
+  const recipesTotal = CP_RECIPES.reduce((a,it) => { const r=rMap[it.recipeId]; return a + (r?recipeCostPerUnit(r)*it.qty:0); }, 0);
+  const packagingTotal = CP_PACKAGING.reduce((a,pid) => { const p = DATA.packagingCatalog.find(p=>p.id===pid); return a + (p?p.cost:0); }, 0);
+  const total = directTotal + recipesTotal + packagingTotal;
+
+  return `
+    ${modalHeader(editing?'Editar postre (costeo)':'Nuevo postre (costeo)')}
+    <div class="field"><div class="field-label">Nombre del postre</div><input class="input" id="cp-name" value="${esc(editing?.name||'')}" placeholder="Ej: Cheesecake"/></div>
+
+    <div class="field-label" style="margin:14px 0 6px">Ingredientes directos</div>
+    <div id="cp-direct-items">
+      ${CP_DIRECT.map((row,i) => `
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+          <select class="input cp-direct-ing" data-idx="${i}" style="flex:2;min-width:140px">
+            <option value="">Elegir ingrediente...</option>
+            ${DATA.ingredients.map(ing=>`<option value="${ing.id}" ${ing.id===row.ingredientId?'selected':''}>${esc(ing.name)}</option>`).join('')}
+          </select>
+          <input type="number" min="0" step="any" class="input cp-direct-qty" data-idx="${i}" value="${row.qty}" style="width:80px" placeholder="cant."/>
+          <span style="font-size:12px;color:var(--chocoSoft);width:34px">${iMap[row.ingredientId]?UNIT_LABEL[iMap[row.ingredientId].unit]:''}</span>
+          <button class="btn-icon cp-direct-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+        </div>
+      `).join('')}
+    </div>
+    <button class="btn btn-ghost" id="cp-add-direct" style="margin-bottom:14px" ${DATA.ingredients.length===0?'disabled':''}>${ICONS.plus} Agregar ingrediente</button>
+
+    <div class="field-label" style="margin:14px 0 6px">Recetas usadas</div>
+    <div id="cp-recipe-items">
+      ${CP_RECIPES.map((row,i) => {
+        const r = rMap[row.recipeId];
+        return `
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+          <select class="input cp-recipe-sel" data-idx="${i}" style="flex:2;min-width:140px">
+            <option value="">Elegir receta...</option>
+            ${DATA.recipes.map(rr=>`<option value="${rr.id}" ${rr.id===row.recipeId?'selected':''}>${esc(rr.name)}</option>`).join('')}
+          </select>
+          <input type="number" min="0" step="any" class="input cp-recipe-qty" data-idx="${i}" value="${row.qty}" style="width:80px" placeholder="cant."/>
+          <span style="font-size:12px;color:var(--chocoSoft);width:60px">${r?UNIT_LABEL[r.yieldUnit]||r.yieldUnit:''}</span>
+          <button class="btn-icon cp-recipe-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+        </div>
+      `; }).join('')}
+    </div>
+    <button class="btn btn-ghost" id="cp-add-recipe" style="margin-bottom:14px" ${DATA.recipes.length===0?'disabled':''}>${ICONS.plus} Agregar receta</button>
+
+    <div class="field-label" style="margin:14px 0 6px">Packaging</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+      ${DATA.packagingCatalog.length===0 ? `<div class="empty" style="padding:0">Cargá packaging primero en la sección de Costeo.</div>` :
+        DATA.packagingCatalog.map(p => `
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;border:1px solid var(--line);padding:6px 10px;border-radius:8px">
+            <input type="checkbox" class="cp-packaging-check" value="${p.id}" ${CP_PACKAGING.includes(p.id)?'checked':''}/> ${esc(p.name)} <span class="num" style="color:var(--chocoSoft)">(${money(p.cost)})</span>
+          </label>
+        `).join('')
+      }
+    </div>
+
+    <div class="card" style="background:var(--cream);border:none">
+      <div class="num row" style="font-size:14px"><span class="row-label">Ingredientes directos</span><span>${money(directTotal)}</span></div>
+      <div class="num row" style="font-size:14px"><span class="row-label">Recetas</span><span>${money(recipesTotal)}</span></div>
+      <div class="num row" style="font-size:14px"><span class="row-label">Packaging</span><span>${money(packagingTotal)}</span></div>
+      <div class="num row" style="font-size:16px;font-weight:800;color:${COLORS.menta}"><span>Costo total del postre</span><span>${money(total)}</span></div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="cp-save">Guardar</button>
+    </div>
+  `;
+}
+function attachCostProductModalEvents(editing){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('cp-add-direct').onclick = () => { CP_DIRECT.push({ingredientId:'', qty:1}); refreshCostProductModal(editing); };
+  document.getElementById('cp-add-recipe').onclick = () => { CP_RECIPES.push({recipeId:'', qty:1}); refreshCostProductModal(editing); };
+  document.querySelectorAll('.cp-direct-ing').forEach(el => el.onchange = () => { CP_DIRECT[+el.dataset.idx].ingredientId = el.value; refreshCostProductModal(editing); });
+  document.querySelectorAll('.cp-direct-qty').forEach(el => el.onchange = () => { CP_DIRECT[+el.dataset.idx].qty = +el.value || 0; refreshCostProductModal(editing); });
+  document.querySelectorAll('.cp-direct-remove').forEach(el => el.onclick = () => { CP_DIRECT.splice(+el.dataset.idx,1); refreshCostProductModal(editing); });
+  document.querySelectorAll('.cp-recipe-sel').forEach(el => el.onchange = () => { CP_RECIPES[+el.dataset.idx].recipeId = el.value; refreshCostProductModal(editing); });
+  document.querySelectorAll('.cp-recipe-qty').forEach(el => el.onchange = () => { CP_RECIPES[+el.dataset.idx].qty = +el.value || 0; refreshCostProductModal(editing); });
+  document.querySelectorAll('.cp-recipe-remove').forEach(el => el.onclick = () => { CP_RECIPES.splice(+el.dataset.idx,1); refreshCostProductModal(editing); });
+  document.querySelectorAll('.cp-packaging-check').forEach(el => el.onchange = () => {
+    CP_PACKAGING = Array.from(document.querySelectorAll('.cp-packaging-check:checked')).map(c=>c.value);
+    refreshCostProductModal(editing);
+  });
+  document.getElementById('cp-save').onclick = () => saveCostProduct(editing);
+}
+function refreshCostProductModal(editing){
+  const name = document.getElementById('cp-name')?.value || '';
+  document.getElementById('modal-box').innerHTML = renderCostProductModalBody(editing);
+  const closeBtn = document.getElementById('modal-close'); if(closeBtn) closeBtn.onclick = closeModal;
+  document.getElementById('cp-name').value = name;
+  attachCostProductModalEvents(editing);
+}
+async function saveCostProduct(editing){
+  const name = document.getElementById('cp-name').value.trim();
+  if(!name){ alert('Poné un nombre.'); return; }
+  const directIngredients = CP_DIRECT.filter(it => it.ingredientId && it.qty>0);
+  const recipesUsed = CP_RECIPES.filter(it => it.recipeId && it.qty>0);
+  const packagingIds = CP_PACKAGING;
+  try{
+    let cpId;
+    if(editing){
+      const { error } = await sb.from('cost_products').update({ name }).eq('id', editing.id);
+      if(error) throw error;
+      cpId = editing.id;
+      await Promise.all([
+        sb.from('cost_product_ingredients').delete().eq('cost_product_id', cpId),
+        sb.from('cost_product_recipes').delete().eq('cost_product_id', cpId),
+        sb.from('cost_product_packaging').delete().eq('cost_product_id', cpId),
+      ]);
+    } else {
+      const { data, error } = await sb.from('cost_products').insert({ name }).select().single();
+      if(error) throw error;
+      cpId = data.id;
+    }
+    const inserts = [];
+    if(directIngredients.length) inserts.push(sb.from('cost_product_ingredients').insert(directIngredients.map(it => ({ cost_product_id: cpId, ingredient_id: it.ingredientId, qty: it.qty }))));
+    if(recipesUsed.length) inserts.push(sb.from('cost_product_recipes').insert(recipesUsed.map(it => ({ cost_product_id: cpId, recipe_id: it.recipeId, qty: it.qty }))));
+    if(packagingIds.length) inserts.push(sb.from('cost_product_packaging').insert(packagingIds.map(pid => ({ cost_product_id: cpId, packaging_id: pid }))));
+    const results = await Promise.all(inserts);
+    const failed = results.find(r => r.error);
+    if(failed) throw failed.error;
+    await loadAll();
+    closeModal();
+  } catch(e){
+    alert('Error al guardar el costeo: ' + e.message);
+  }
 }
 
 /* ===================== INIT ===================== */

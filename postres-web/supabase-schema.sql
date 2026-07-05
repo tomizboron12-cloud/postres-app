@@ -78,6 +78,95 @@ insert into loyalty_config (id, threshold, reward) values (1, 10, '1 postre grat
   on conflict (id) do nothing;
 
 -- ============================================================
+-- Calculadora de costos: ingredientes, recetas, catálogo de packaging
+-- y costeo de postres. Todo se recalcula al vuelo desde el precio
+-- actual de los ingredientes (no se guarda ningún costo fijo acá).
+-- ============================================================
+create table if not exists ingredients (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  price numeric not null default 0,
+  package_qty numeric not null default 0,
+  unit text not null default 'g',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists recipes (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  yield_qty numeric not null default 0,
+  yield_unit text not null default 'g',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists recipe_items (
+  id uuid primary key default gen_random_uuid(),
+  recipe_id uuid not null references recipes(id) on delete cascade,
+  ingredient_id uuid references ingredients(id) on delete set null,
+  qty numeric not null default 0
+);
+
+create table if not exists packaging_catalog (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  cost numeric not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists cost_products (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists cost_product_ingredients (
+  id uuid primary key default gen_random_uuid(),
+  cost_product_id uuid not null references cost_products(id) on delete cascade,
+  ingredient_id uuid references ingredients(id) on delete set null,
+  qty numeric not null default 0
+);
+
+create table if not exists cost_product_recipes (
+  id uuid primary key default gen_random_uuid(),
+  cost_product_id uuid not null references cost_products(id) on delete cascade,
+  recipe_id uuid references recipes(id) on delete set null,
+  qty numeric not null default 0
+);
+
+create table if not exists cost_product_packaging (
+  id uuid primary key default gen_random_uuid(),
+  cost_product_id uuid not null references cost_products(id) on delete cascade,
+  packaging_id uuid not null references packaging_catalog(id) on delete cascade
+);
+
+alter table ingredients enable row level security;
+alter table recipes enable row level security;
+alter table recipe_items enable row level security;
+alter table packaging_catalog enable row level security;
+alter table cost_products enable row level security;
+alter table cost_product_ingredients enable row level security;
+alter table cost_product_recipes enable row level security;
+alter table cost_product_packaging enable row level security;
+
+create policy "anon full access" on ingredients for all using (true) with check (true);
+create policy "anon full access" on recipes for all using (true) with check (true);
+create policy "anon full access" on recipe_items for all using (true) with check (true);
+create policy "anon full access" on packaging_catalog for all using (true) with check (true);
+create policy "anon full access" on cost_products for all using (true) with check (true);
+create policy "anon full access" on cost_product_ingredients for all using (true) with check (true);
+create policy "anon full access" on cost_product_recipes for all using (true) with check (true);
+create policy "anon full access" on cost_product_packaging for all using (true) with check (true);
+
+alter publication supabase_realtime add table ingredients;
+alter publication supabase_realtime add table recipes;
+alter publication supabase_realtime add table recipe_items;
+alter publication supabase_realtime add table packaging_catalog;
+alter publication supabase_realtime add table cost_products;
+alter publication supabase_realtime add table cost_product_ingredients;
+alter publication supabase_realtime add table cost_product_recipes;
+alter publication supabase_realtime add table cost_product_packaging;
+
+-- ============================================================
 -- Funciones atómicas (evitan pisadas de datos si las dos usan la app
 -- al mismo tiempo desde distintos dispositivos)
 -- ============================================================
