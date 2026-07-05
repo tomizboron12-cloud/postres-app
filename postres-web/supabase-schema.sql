@@ -215,3 +215,32 @@ create policy "anon full access" on sales for all using (true) with check (true)
 create policy "anon full access" on sale_items for all using (true) with check (true);
 create policy "anon full access" on purchases for all using (true) with check (true);
 create policy "anon full access" on loyalty_config for all using (true) with check (true);
+
+-- ============================================================
+-- Stock de ingredientes, vínculo producto-costeo, compras de
+-- ingredientes automáticas y lista de compras.
+-- ============================================================
+alter table ingredients add column if not exists current_stock numeric not null default 0;
+alter table ingredients add column if not exists low_stock_alert numeric not null default 0;
+
+alter table products add column if not exists cost_product_id uuid references cost_products(id) on delete set null;
+
+alter table purchases add column if not exists ingredient_id uuid references ingredients(id) on delete set null;
+alter table purchases add column if not exists ingredient_qty numeric;
+
+create table if not exists shopping_list_manual (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  checked boolean not null default false,
+  created_at timestamptz not null default now()
+);
+alter table shopping_list_manual enable row level security;
+create policy "anon full access" on shopping_list_manual for all using (true) with check (true);
+alter publication supabase_realtime add table shopping_list_manual;
+
+create or replace function adjust_ingredient_stock(p_ingredient_id uuid, p_delta numeric)
+returns numeric as $$
+  update ingredients set current_stock = current_stock + p_delta
+  where id = p_ingredient_id
+  returning current_stock;
+$$ language sql;

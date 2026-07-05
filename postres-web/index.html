@@ -142,7 +142,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 const CURRENT_USER_KEY = 'postres-current-user';
 
 /* ===================== ESTADO GLOBAL ===================== */
-let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[] };
+let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[], shoppingListManual:[] };
 let TAB = 'dashboard';
 let MODAL = null;
 let SEARCH_Q = '';
@@ -155,7 +155,7 @@ function currentUser(){ return localStorage.getItem(CURRENT_USER_KEY); }
 
 /* ===================== CARGA DE DATOS (SUPABASE) ===================== */
 async function loadAll(){
-  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR] = await Promise.all([
+  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR, shoppingR] = await Promise.all([
     sb.from('owners').select('*').order('id'),
     sb.from('products').select('*').order('created_at'),
     sb.from('clients').select('*').order('name'),
@@ -166,17 +166,18 @@ async function loadAll(){
     sb.from('recipes').select('*, recipe_items(*)').order('name'),
     sb.from('packaging_catalog').select('*').order('name'),
     sb.from('cost_products').select('*, cost_product_ingredients(*), cost_product_recipes(*), cost_product_packaging(*)').order('name'),
+    sb.from('shopping_list_manual').select('*').order('created_at'),
   ]);
   if(ownersR.data) DATA.owners = ownersR.data.map(o=>({id:o.id, name:o.name}));
-  if(productsR.data) DATA.products = productsR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, price:+p.price, ownerId:p.owner_id, trackStock:p.track_stock, stock:p.stock, lowStockAlert:p.low_stock_alert}));
+  if(productsR.data) DATA.products = productsR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, price:+p.price, ownerId:p.owner_id, trackStock:p.track_stock, stock:p.stock, lowStockAlert:p.low_stock_alert, costProductId:p.cost_product_id}));
   if(clientsR.data) DATA.clients = clientsR.data.map(c=>({id:c.id, name:c.name, phone:c.phone||'', purchaseCount:c.purchase_count||0}));
   if(salesR.data) DATA.sales = salesR.data.map(s=>({
     id:s.id, date:s.date, clientId:s.client_id, paymentMethod:s.payment_method, discount:+s.discount,
     items:(s.sale_items||[]).map(it=>({productId:it.product_id, productName:it.product_name, ownerId:it.owner_id, qty:it.qty, cost:+it.cost, price:+it.price}))
   }));
-  if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category}));
+  if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category, ingredientId:p.ingredient_id, ingredientQty:p.ingredient_qty!=null?+p.ingredient_qty:null}));
   if(loyaltyR.data) DATA.loyalty = {threshold:loyaltyR.data.threshold, reward:loyaltyR.data.reward};
-  if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, packageQty:+i.package_qty, unit:i.unit}));
+  if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, packageQty:+i.package_qty, unit:i.unit, currentStock:+i.current_stock||0, lowStockAlert:+i.low_stock_alert||0}));
   if(recipesR.data) DATA.recipes = recipesR.data.map(r=>({
     id:r.id, name:r.name, yieldQty:+r.yield_qty, yieldUnit:r.yield_unit,
     items:(r.recipe_items||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty}))
@@ -188,6 +189,7 @@ async function loadAll(){
     recipesUsed:(cp.cost_product_recipes||[]).map(it=>({recipeId:it.recipe_id, qty:+it.qty})),
     packagingIds:(cp.cost_product_packaging||[]).map(it=>it.packaging_id),
   }));
+  if(shoppingR.data) DATA.shoppingListManual = shoppingR.data.map(i=>({id:i.id, name:i.name, checked:i.checked}));
   LOADED = true;
 }
 
@@ -199,7 +201,8 @@ function scheduleReload(){
 function subscribeRealtime(){
   const channel = sb.channel('postres-sync');
   ['products','clients','sales','sale_items','purchases','loyalty_config','owners',
-   'ingredients','recipes','recipe_items','packaging_catalog','cost_products','cost_product_ingredients','cost_product_recipes','cost_product_packaging'].forEach(table => {
+   'ingredients','recipes','recipe_items','packaging_catalog','cost_products','cost_product_ingredients','cost_product_recipes','cost_product_packaging',
+   'shopping_list_manual'].forEach(table => {
     channel.on('postgres_changes', {event:'*', schema:'public', table}, scheduleReload);
   });
   channel.subscribe();
@@ -273,6 +276,23 @@ function costProductBreakdown(cp){
 }
 const UNIT_LABEL = { g:'g', ml:'ml', unidades:'unidades' };
 
+function ingredientConsumptionForCostProduct(cp, multiplier){
+  const rMap = recipeMap();
+  const consumption = {}; // ingredientId -> qty consumida
+  for(const it of (cp.directIngredients||[])){
+    consumption[it.ingredientId] = (consumption[it.ingredientId]||0) + it.qty * multiplier;
+  }
+  for(const it of (cp.recipesUsed||[])){
+    const r = rMap[it.recipeId];
+    if(!r || !r.yieldQty) continue;
+    for(const ri of (r.items||[])){
+      const perUnit = ri.qty / r.yieldQty;
+      consumption[ri.ingredientId] = (consumption[ri.ingredientId]||0) + perUnit * it.qty * multiplier;
+    }
+  }
+  return consumption;
+}
+
 /* ===================== RENDER RAÍZ ===================== */
 const NAV = [
   {id:'dashboard', label:'Resumen', icon:ICONS.trending},
@@ -283,6 +303,7 @@ const NAV = [
   {id:'ingredients', label:'Ingredientes', icon:ICONS.package},
   {id:'recipes', label:'Recetas', icon:ICONS.edit},
   {id:'costing', label:'Costeo', icon:ICONS.gift},
+  {id:'shopping', label:'Lista de compras', icon:ICONS.alert},
 ];
 
 function render(){
@@ -347,8 +368,10 @@ function render(){
   if(TAB==='ingredients') main.innerHTML = renderIngredients();
   if(TAB==='recipes') main.innerHTML = renderRecipes();
   if(TAB==='costing') main.innerHTML = renderCosting();
+  if(TAB==='shopping') main.innerHTML = renderShopping();
 
   attachTabEvents();
+  if(TAB==='shopping') attachShoppingEvents();
   renderModal();
 }
 
@@ -551,11 +574,17 @@ async function removeSale(id){
 
 /* ===================== PRODUCTOS ===================== */
 function renderProducts(){
+  const actionButtons = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-ghost" data-open-modal="stockMovement">${ICONS.package} Cargar stock</button>
+      <button class="btn btn-primary" data-open-modal="newProduct">${ICONS.plus} Nuevo postre</button>
+    </div>
+  `;
   if(DATA.products.length===0){
     return `
       <div class="header-row">
         <div><div class="header-title serif">Productos</div><div class="header-sub">Cada postre con su costo, precio, dueño y stock</div></div>
-        <button class="btn btn-primary" data-open-modal="newProduct">${ICONS.plus} Nuevo postre</button>
+        ${actionButtons}
       </div>
       <div class="card"><div class="empty">Todavía no cargaste postres.</div></div>
     `;
@@ -563,7 +592,7 @@ function renderProducts(){
   return `
     <div class="header-row">
       <div><div class="header-title serif">Productos</div><div class="header-sub">Cada postre con su costo, precio, dueño y stock</div></div>
-      <button class="btn btn-primary" data-open-modal="newProduct">${ICONS.plus} Nuevo postre</button>
+      ${actionButtons}
     </div>
     <div class="grid-cards">
       ${DATA.products.map(p => {
@@ -714,10 +743,11 @@ function renderIngredients(){
       <div class="grid-cards">
         ${DATA.ingredients.map(ing => {
           const costUnit = ingredientCostPerUnit(ing);
+          const low = ing.lowStockAlert>0 && (ing.currentStock||0) <= ing.lowStockAlert;
           return `
-            <div class="card">
+            <div class="card" style="${low?`border-color:${COLORS.frutilla}`:''}">
               <div style="display:flex;justify-content:space-between;align-items:flex-start">
-                <div style="font-weight:700;font-size:16px">${esc(ing.name)}</div>
+                <div style="font-weight:700;font-size:16px">${esc(ing.name)} ${low?`<span class="pill" style="background:${COLORS.frutilla}1c;color:${COLORS.frutillaDark}">Stock bajo</span>`:''}</div>
                 <div style="display:flex;gap:4px">
                   <button class="btn-icon" data-edit-ingredient="${ing.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
                   <button class="btn-icon" data-remove-ingredient="${ing.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
@@ -727,6 +757,7 @@ function renderIngredients(){
                 <div class="row"><span class="row-label">Precio pagado</span><span class="row-value">${money(ing.price)}</span></div>
                 <div class="row"><span class="row-label">Cantidad del envase</span><span class="row-value">${ing.packageQty} ${UNIT_LABEL[ing.unit]}</span></div>
                 <div class="row"><span class="row-label">Costo por ${UNIT_LABEL[ing.unit]}</span><span class="row-value bold" style="color:${COLORS.menta}">${money(costUnit)}</span></div>
+                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock actual</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${ing.currentStock||0} ${UNIT_LABEL[ing.unit]}</span></div>
               </div>
             </div>
           `;
@@ -893,12 +924,13 @@ function renderModal(){
   if(MODAL.type==='newSale') inner = saleModalHtml();
   if(MODAL.type==='newProduct') inner = productModalHtml(MODAL.payload);
   if(MODAL.type==='newClient') inner = clientModalHtml(MODAL.payload);
-  if(MODAL.type==='newPurchase') inner = purchaseModalHtml();
+  if(MODAL.type==='newPurchase') inner = purchaseModalHtml(MODAL.prefillIngredientId);
   if(MODAL.type==='loyalty') inner = loyaltyModalHtml();
   if(MODAL.type==='newIngredient') inner = ingredientModalHtml(MODAL.payload);
   if(MODAL.type==='newRecipe') inner = recipeModalHtml(MODAL.payload);
   if(MODAL.type==='newPackagingItem') inner = packagingItemModalHtml();
   if(MODAL.type==='newCostProduct') inner = costProductModalHtml(MODAL.payload);
+  if(MODAL.type==='stockMovement') inner = stockMovementModalHtml();
 
   const wide = MODAL.type==='newRecipe' || MODAL.type==='newCostProduct';
   host.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-box" style="${wide?'width:560px':''}">${inner}</div></div>`;
@@ -910,12 +942,13 @@ function renderModal(){
   if(MODAL.type==='newSale') attachSaleModalEvents();
   if(MODAL.type==='newProduct') attachProductModalEvents(MODAL.payload);
   if(MODAL.type==='newClient') attachClientModalEvents(MODAL.payload);
-  if(MODAL.type==='newPurchase') attachPurchaseModalEvents();
+  if(MODAL.type==='newPurchase') attachPurchaseModalEvents(MODAL.prefillIngredientId);
   if(MODAL.type==='loyalty') attachLoyaltyModalEvents();
   if(MODAL.type==='newIngredient') attachIngredientModalEvents(MODAL.payload);
   if(MODAL.type==='newRecipe') attachRecipeModalEvents(MODAL.payload);
   if(MODAL.type==='newPackagingItem') attachPackagingItemModalEvents();
   if(MODAL.type==='newCostProduct') attachCostProductModalEvents(MODAL.payload);
+  if(MODAL.type==='stockMovement') attachStockMovementModalEvents();
 }
 
 function modalHeader(title){
@@ -1106,6 +1139,13 @@ function productModalHtml(editing){
       <div style="flex:1" class="field"><div class="field-label">Stock actual</div><input type="number" class="input" id="p-stock" value="${editing?.stock ?? 0}"/></div>
       <div style="flex:1" class="field"><div class="field-label">Alertar si baja de</div><input type="number" class="input" id="p-lowstock" value="${editing?.lowStockAlert ?? 3}"/></div>
     </div>
+    <div class="field"><div class="field-label">Receta de costeo vinculada (opcional)</div>
+      <select class="input" id="p-costproduct">
+        <option value="">Sin vincular (no descuenta ingredientes)</option>
+        ${DATA.costProducts.map(cp=>`<option value="${cp.id}" ${editing?.costProductId===cp.id?'selected':''}>${esc(cp.name)}</option>`).join('')}
+      </select>
+      <div style="font-size:12px;color:var(--chocoSoft);margin-top:4px">Si la vinculás, al "Cargar stock" en Productos se van a descontar solos los ingredientes según la receta de costeo.</div>
+    </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
       <button class="btn btn-primary" id="p-save">Guardar</button>
@@ -1127,7 +1167,8 @@ function attachProductModalEvents(editing){
     const trackStock = document.getElementById('p-track').checked;
     const stock = +document.getElementById('p-stock').value || 0;
     const lowStockAlert = +document.getElementById('p-lowstock').value || 0;
-    const payload = { name, cost, price, owner_id: ownerId, track_stock: trackStock, stock, low_stock_alert: lowStockAlert };
+    const costProductId = document.getElementById('p-costproduct').value || null;
+    const payload = { name, cost, price, owner_id: ownerId, track_stock: trackStock, stock, low_stock_alert: lowStockAlert, cost_product_id: costProductId };
     const { error } = editing
       ? await sb.from('products').update(payload).eq('id', editing.id)
       : await sb.from('products').insert(payload);
@@ -1189,21 +1230,30 @@ function attachLoyaltyModalEvents(){
 }
 
 /* ---- Gasto / compra ---- */
-function purchaseModalHtml(){
+function purchaseModalHtml(prefillIngredientId){
   return `
     ${modalHeader('Nuevo gasto / compra')}
-    <div class="field"><div class="field-label">Descripción</div><input class="input" id="pu-desc" placeholder="Ej: Dulce de leche x5kg"/></div>
+    <div class="field"><div class="field-label">Categoría</div>
+      <select class="input" id="pu-category">
+        <option>Ingredientes</option><option>Packaging</option><option>Delivery</option><option>Redes / Marketing</option><option>Otro</option>
+      </select>
+    </div>
+    <div id="pu-ingredient-fields" style="display:flex;gap:10px">
+      <div style="flex:2" class="field"><div class="field-label">Ingrediente</div>
+        <select class="input" id="pu-ingredient">
+          <option value="">Elegir ingrediente...</option>
+          ${DATA.ingredients.map(ing=>`<option value="${ing.id}" ${ing.id===prefillIngredientId?'selected':''}>${esc(ing.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="flex:1" class="field"><div class="field-label">Cantidad comprada</div><input type="number" min="0" step="any" class="input" id="pu-ing-qty" placeholder="Ej: 5000"/></div>
+    </div>
+    <div id="pu-desc-field" class="field" style="display:none"><div class="field-label">Descripción</div><input class="input" id="pu-desc" placeholder="Ej: Cajas individuales x50"/></div>
     <div style="display:flex;gap:10px">
       <div style="flex:1" class="field"><div class="field-label">Monto</div><input type="number" class="input" id="pu-amount"/></div>
       <div style="flex:1" class="field"><div class="field-label">Fecha</div><input type="date" class="input" id="pu-date" value="${todayISO()}"/></div>
     </div>
-    <div style="display:flex;gap:10px">
-      <div style="flex:1" class="field"><div class="field-label">Categoría</div>
-        <select class="input" id="pu-category"><option>Ingredientes</option><option>Packaging</option><option>Delivery</option><option>Redes / Marketing</option><option>Otro</option></select>
-      </div>
-      <div style="flex:1" class="field"><div class="field-label">A cargo de</div>
-        <select class="input" id="pu-owner">${DATA.owners.map(o=>`<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select>
-      </div>
+    <div class="field"><div class="field-label">A cargo de</div>
+      <select class="input" id="pu-owner">${DATA.owners.map(o=>`<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
@@ -1211,17 +1261,43 @@ function purchaseModalHtml(){
     </div>
   `;
 }
-function attachPurchaseModalEvents(){
+function attachPurchaseModalEvents(prefillIngredientId){
   document.getElementById('modal-cancel').onclick = closeModal;
+  const catEl = document.getElementById('pu-category');
+  const ingFields = document.getElementById('pu-ingredient-fields');
+  const descField = document.getElementById('pu-desc-field');
+  const syncFields = () => {
+    const isIngredient = catEl.value === 'Ingredientes';
+    ingFields.style.display = isIngredient ? 'flex' : 'none';
+    descField.style.display = isIngredient ? 'none' : 'block';
+  };
+  if(prefillIngredientId) catEl.value = 'Ingredientes';
+  catEl.onchange = syncFields; syncFields();
+
   document.getElementById('pu-save').onclick = async () => {
-    const description = document.getElementById('pu-desc').value.trim();
+    const category = catEl.value;
     const amount = +document.getElementById('pu-amount').value;
-    if(!description || !amount){ alert('Completá descripción y monto.'); return; }
     const date = document.getElementById('pu-date').value || todayISO();
-    const category = document.getElementById('pu-category').value;
     const ownerId = document.getElementById('pu-owner').value;
-    const { error } = await sb.from('purchases').insert({ description, amount, date, owner_id: ownerId, category });
-    if(error){ alert('Error al guardar: ' + error.message); return; }
+    if(!amount){ alert('Poné el monto.'); return; }
+
+    if(category === 'Ingredientes'){
+      const ingredientId = document.getElementById('pu-ingredient').value;
+      const qty = +document.getElementById('pu-ing-qty').value || 0;
+      if(!ingredientId){ alert('Elegí un ingrediente.'); return; }
+      if(!qty){ alert('Poné la cantidad comprada.'); return; }
+      const ing = DATA.ingredients.find(i=>i.id===ingredientId);
+      const description = ing ? `${ing.name} (${qty} ${UNIT_LABEL[ing.unit]||''})` : 'Ingrediente';
+      const { error } = await sb.from('purchases').insert({ description, amount, date, owner_id: ownerId, category, ingredient_id: ingredientId, ingredient_qty: qty });
+      if(error){ alert('Error al guardar: ' + error.message); return; }
+      const { error: rpcErr } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: ingredientId, p_delta: qty });
+      if(rpcErr){ alert('Error al actualizar el stock: ' + rpcErr.message); return; }
+    } else {
+      const description = document.getElementById('pu-desc').value.trim();
+      if(!description){ alert('Completá la descripción.'); return; }
+      const { error } = await sb.from('purchases').insert({ description, amount, date, owner_id: ownerId, category });
+      if(error){ alert('Error al guardar: ' + error.message); return; }
+    }
     await loadAll();
     closeModal();
   };
@@ -1243,6 +1319,10 @@ function ingredientModalHtml(editing){
         <option value="unidades" ${editing?.unit==='unidades'?'selected':''}>Unidades</option>
       </select>
     </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Stock actual (cuánto tenés)</div><input type="number" class="input" id="ing-stock" value="${editing?.currentStock ?? 0}"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Avisar si baja de</div><input type="number" class="input" id="ing-lowstock" value="${editing?.lowStockAlert ?? 0}"/></div>
+    </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
       <button class="btn btn-primary" id="ing-save">Guardar</button>
@@ -1256,9 +1336,11 @@ function attachIngredientModalEvents(editing){
     const price = +document.getElementById('ing-price').value || 0;
     const packageQty = +document.getElementById('ing-qty').value || 0;
     const unit = document.getElementById('ing-unit').value;
+    const currentStock = +document.getElementById('ing-stock').value || 0;
+    const lowStockAlert = +document.getElementById('ing-lowstock').value || 0;
     if(!name){ alert('Poné un nombre.'); return; }
     if(!packageQty){ alert('Poné la cantidad que trae el envase.'); return; }
-    const payload = { name, price, package_qty: packageQty, unit };
+    const payload = { name, price, package_qty: packageQty, unit, current_stock: currentStock, low_stock_alert: lowStockAlert };
     const { error } = editing
       ? await sb.from('ingredients').update(payload).eq('id', editing.id)
       : await sb.from('ingredients').insert(payload);
@@ -1526,6 +1608,171 @@ async function saveCostProduct(editing){
   } catch(e){
     alert('Error al guardar el costeo: ' + e.message);
   }
+}
+
+/* ---- Movimiento de stock (producir / merma) ---- */
+function stockMovementModalHtml(){
+  const options = DATA.products.map(p=>`<option value="${p.id}">${esc(p.name)}${p.costProductId?' (vinculado a costeo)':''}</option>`).join('');
+  return `
+    ${modalHeader('Cargar movimiento de stock')}
+    <div class="field"><div class="field-label">Postre</div>
+      <select class="input" id="sm-product"><option value="">Elegir postre...</option>${options}</select>
+    </div>
+    <div class="field"><div class="field-label">Tipo de movimiento</div>
+      <select class="input" id="sm-type">
+        <option value="produccion">Hizo postres nuevos (suma stock)</option>
+        <option value="merma">Se comió / rompió / merma (resta stock, sin afectar ingredientes)</option>
+      </select>
+    </div>
+    <div class="field"><div class="field-label">Cantidad</div><input type="number" min="1" class="input" id="sm-qty" value="1"/></div>
+    <div id="sm-preview" style="font-size:13px;color:var(--chocoSoft)"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="sm-save">Guardar</button>
+    </div>
+  `;
+}
+function attachStockMovementModalEvents(){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  const updatePreview = () => {
+    const productId = document.getElementById('sm-product').value;
+    const type = document.getElementById('sm-type').value;
+    const qty = +document.getElementById('sm-qty').value || 0;
+    const preview = document.getElementById('sm-preview');
+    const p = DATA.products.find(p=>p.id===productId);
+    if(!p || type!=='produccion' || !p.costProductId){ preview.innerHTML = ''; return; }
+    const cp = DATA.costProducts.find(cp=>cp.id===p.costProductId);
+    if(!cp){ preview.innerHTML = ''; return; }
+    const consumption = ingredientConsumptionForCostProduct(cp, qty);
+    const iMap = ingredientMap();
+    const lines = Object.entries(consumption).map(([ingId, amt]) => {
+      const ing = iMap[ingId];
+      if(!ing) return '';
+      const after = (ing.currentStock||0) - amt;
+      const warn = after < 0;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">${esc(ing.name)} (se va a descontar ${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${warn?COLORS.frutillaDark:'inherit'}">quedan ${after.toFixed(1)}</span></div>`;
+    }).join('');
+    preview.innerHTML = lines ? `<div class="field-label" style="margin-bottom:4px">Se van a descontar estos ingredientes:</div>${lines}` : '';
+  };
+  document.getElementById('sm-product').onchange = updatePreview;
+  document.getElementById('sm-type').onchange = updatePreview;
+  document.getElementById('sm-qty').oninput = updatePreview;
+  document.getElementById('sm-save').onclick = async () => {
+    const productId = document.getElementById('sm-product').value;
+    const type = document.getElementById('sm-type').value;
+    const qty = +document.getElementById('sm-qty').value || 0;
+    if(!productId){ alert('Elegí un postre.'); return; }
+    if(!qty || qty<=0){ alert('Poné una cantidad válida.'); return; }
+    const p = DATA.products.find(p=>p.id===productId);
+    if(!p) return;
+    try{
+      if(type==='produccion'){
+        const { error } = await sb.rpc('adjust_stock', { p_product_id: productId, p_delta: qty });
+        if(error) throw error;
+        let warnings = [];
+        if(p.costProductId){
+          const cp = DATA.costProducts.find(cp=>cp.id===p.costProductId);
+          if(cp){
+            const consumption = ingredientConsumptionForCostProduct(cp, qty);
+            await Promise.all(Object.entries(consumption).map(async ([ingId, amt]) => {
+              const ing = DATA.ingredients.find(i=>i.id===ingId);
+              if(!ing) return;
+              const { data: newStock, error: e2 } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: ingId, p_delta: -amt });
+              if(e2) throw e2;
+              if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
+            }));
+          }
+        }
+        await loadAll();
+        closeModal();
+        if(warnings.length) alert(`⚠ Ojo, quedaste con poco stock de: ${warnings.join(', ')}.`);
+      } else {
+        const { error } = await sb.rpc('adjust_stock', { p_product_id: productId, p_delta: -qty });
+        if(error) throw error;
+        await loadAll();
+        closeModal();
+      }
+    } catch(e){
+      alert('Error al guardar el movimiento: ' + e.message);
+    }
+  };
+}
+
+/* ===================== LISTA DE COMPRAS ===================== */
+function renderShopping(){
+  const lowIngredients = DATA.ingredients.filter(i=>i.lowStockAlert>0 && (i.currentStock||0)<=i.lowStockAlert);
+  const manualItems = DATA.shoppingListManual || [];
+
+  return `
+    <div class="header-row">
+      <div><div class="header-title serif">Lista de compras</div><div class="header-sub">Lo que queda poco se agrega solo, y también podés anotar otras cosas a mano</div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:18px">
+      <div style="display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:10px">${ICONS.alert.replace('currentColor', COLORS.frutillaDark)} <span style="color:${COLORS.frutillaDark}">Ingredientes con poco stock</span></div>
+      ${lowIngredients.length===0 ? `<div class="empty" style="padding:8px 0">Por ahora no hay ningún ingrediente bajo — todo en orden.</div>` :
+        lowIngredients.map(ing => `
+          <div class="row" style="font-size:14px;align-items:center;flex-wrap:wrap;gap:6px">
+            <span class="row-label">${esc(ing.name)} <span class="num" style="color:${COLORS.frutillaDark}">— quedan ${(ing.currentStock||0).toFixed(1)} ${UNIT_LABEL[ing.unit]} (aviso en ${ing.lowStockAlert})</span></span>
+            <button class="btn btn-ghost" data-quick-purchase-ingredient="${ing.id}" style="padding:5px 10px;font-size:12.5px">${ICONS.plus} Ya compré</button>
+          </div>
+        `).join('')
+      }
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="serif" style="font-weight:700;font-size:16px">Otras cosas para comprar</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+        <input class="input" id="shop-new-item" placeholder="Ej: Etiquetas, cinta para embalar..." style="flex:1;min-width:180px"/>
+        <button class="btn btn-primary" id="shop-add-item">${ICONS.plus} Agregar</button>
+      </div>
+      ${manualItems.length===0 ? `<div class="empty" style="padding:8px 0">No hay nada anotado todavía.</div>` :
+        manualItems.map(item => `
+          <div class="row" style="font-size:14px;align-items:center">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;${item.checked?'opacity:0.5;text-decoration:line-through':''}">
+              <input type="checkbox" class="shop-item-check" data-id="${item.id}" ${item.checked?'checked':''}/>
+              <span>${esc(item.name)}</span>
+            </label>
+            <button class="btn-icon" data-remove-shop-item="${item.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+          </div>
+        `).join('')
+      }
+    </div>
+  `;
+}
+function attachShoppingEvents(){
+  const addBtn = document.getElementById('shop-add-item');
+  if(addBtn){
+    const input = document.getElementById('shop-new-item');
+    const addItem = async () => {
+      const name = input.value.trim();
+      if(!name) return;
+      const { error } = await sb.from('shopping_list_manual').insert({ name, checked: false });
+      if(error){ alert('Error al guardar: ' + error.message); return; }
+      await loadAll();
+      render();
+    };
+    addBtn.onclick = addItem;
+    input.onkeydown = (e) => { if(e.key==='Enter') addItem(); };
+  }
+  document.querySelectorAll('.shop-item-check').forEach(el => el.onchange = async () => {
+    const { error } = await sb.from('shopping_list_manual').update({ checked: el.checked }).eq('id', el.dataset.id);
+    if(error){ alert('Error: ' + error.message); return; }
+    await loadAll();
+    render();
+  });
+  document.querySelectorAll('[data-remove-shop-item]').forEach(b => b.onclick = async () => {
+    const { error } = await sb.from('shopping_list_manual').delete().eq('id', b.dataset.removeShopItem);
+    if(error){ alert('Error: ' + error.message); return; }
+    await loadAll();
+    render();
+  });
+  document.querySelectorAll('[data-quick-purchase-ingredient]').forEach(b => b.onclick = () => {
+    MODAL = { type:'newPurchase', prefillIngredientId: b.dataset.quickPurchaseIngredient };
+    renderModal();
+  });
 }
 
 /* ===================== INIT ===================== */
