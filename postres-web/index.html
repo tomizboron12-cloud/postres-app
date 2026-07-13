@@ -163,7 +163,7 @@ async function loadAll(){
     sb.from('owners').select('*').order('id'),
     sb.from('products').select('*').order('created_at'),
     sb.from('clients').select('*').order('name'),
-    sb.from('sales').select('*, sale_items(*)').order('date', {ascending:false}),
+    sb.from('sales').select('*, sale_items(*), sale_bags(*)').order('date', {ascending:false}),
     sb.from('purchases').select('*').order('date', {ascending:false}),
     sb.from('loyalty_config').select('*').eq('id',1).maybeSingle(),
     sb.from('ingredients').select('*').order('name'),
@@ -178,7 +178,8 @@ async function loadAll(){
   if(clientsR.data) DATA.clients = clientsR.data.map(c=>({id:c.id, name:c.name, phone:c.phone||'', purchaseCount:c.purchase_count||0}));
   if(salesR.data) DATA.sales = salesR.data.map(s=>({
     id:s.id, date:s.date, clientId:s.client_id, paymentMethod:s.payment_method, discount:+s.discount,
-    items:(s.sale_items||[]).map(it=>({productId:it.product_id, productName:it.product_name, ownerId:it.owner_id, qty:it.qty, cost:+it.cost, price:+it.price}))
+    items:(s.sale_items||[]).map(it=>({productId:it.product_id, productName:it.product_name, ownerId:it.owner_id, qty:it.qty, cost:+it.cost, price:+it.price})),
+    bagsUsed:(s.sale_bags||[]).map(b=>({packagingId:b.packaging_id, qty:+b.qty}))
   }));
   if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category, ingredientId:p.ingredient_id, ingredientQty:p.ingredient_qty!=null?+p.ingredient_qty:null, packagingId:p.packaging_id, packagingQty:p.packaging_qty!=null?+p.packaging_qty:null}));
   if(loyaltyR.data) DATA.loyalty = {threshold:loyaltyR.data.threshold, reward:loyaltyR.data.reward};
@@ -187,7 +188,7 @@ async function loadAll(){
     id:r.id, name:r.name, yieldQty:+r.yield_qty, yieldUnit:r.yield_unit, currentStock:+r.current_stock||0, lowStockAlert:+r.low_stock_alert||0,
     items:(r.recipe_items||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty}))
   }));
-  if(packagingR.data) DATA.packagingCatalog = packagingR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, currentStock:+p.current_stock||0, lowStockAlert:+p.low_stock_alert||0}));
+  if(packagingR.data) DATA.packagingCatalog = packagingR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, currentStock:+p.current_stock||0, lowStockAlert:+p.low_stock_alert||0, consumptionType:p.consumption_type||'produccion'}));
   if(costProductsR.data) DATA.costProducts = costProductsR.data.map(cp=>({
     id:cp.id, name:cp.name,
     directIngredients:(cp.cost_product_ingredients||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty})),
@@ -208,7 +209,7 @@ function subscribeRealtime(){
   const channel = sb.channel('postres-sync');
   ['products','clients','sales','sale_items','purchases','loyalty_config','owners',
    'ingredients','recipes','recipe_items','packaging_catalog','cost_products','cost_product_ingredients','cost_product_recipes','cost_product_packaging',
-   'shopping_list_manual','work_in_progress'].forEach(table => {
+   'shopping_list_manual','work_in_progress','sale_bags'].forEach(table => {
     channel.on('postgres_changes', {event:'*', schema:'public', table}, scheduleReload);
   });
   channel.subscribe();
@@ -289,6 +290,11 @@ function costProductBreakdown(cp){
   return { directTotal, recipesTotal, packagingTotal, total: directTotal + recipesTotal + packagingTotal };
 }
 const UNIT_LABEL = { g:'g', ml:'ml', unidades:'unidades' };
+// Redondea cantidades de stock para mostrar prolijo (sin decimales largos por errores de coma flotante)
+function fmtQty(n){
+  const v = Math.round((n||0) * 100) / 100;
+  return v % 1 === 0 ? v.toString() : v.toFixed(2).replace(/0+$/,'').replace(/\.$/,'');
+}
 
 function ingredientConsumptionForCostProduct(cp, multiplier){
   // Solo ingredientes DIRECTOS (los que no pasan por una receta) se descuentan como ingrediente crudo.
@@ -307,9 +313,13 @@ function recipeConsumptionForCostProduct(cp, multiplier){
   return consumption;
 }
 function packagingConsumptionForCostProduct(cp, multiplier){
-  // Un pote/caja de cada packaging vinculado por cada unidad producida.
+  // Solo el packaging marcado como "se descuenta al producir" (ej: Pote) se descuenta acá.
+  // El de tipo "venta" (bolsas) se descuenta al cargar la venta, y el de tipo
+  // "ninguno" (sticker, tarjeta) nunca se descuenta automático.
   const consumption = {};
   for(const pid of (cp.packagingIds||[])){
+    const pk = DATA.packagingCatalog.find(p=>p.id===pid);
+    if(!pk || pk.consumptionType !== 'produccion') continue;
     consumption[pid] = (consumption[pid]||0) + multiplier;
   }
   return consumption;
@@ -664,6 +674,9 @@ async function removeSale(id){
       const qtySum = sale.items.reduce((a,it)=>a+it.qty,0);
       await sb.rpc('adjust_purchase_count', {p_client_id: sale.clientId, p_delta: -qtySum});
     }
+    for(const b of (sale.bagsUsed||[])){
+      if(b.packagingId) await sb.rpc('adjust_packaging_stock', {p_packaging_id: b.packagingId, p_delta: b.qty});
+    }
     const { error } = await sb.from('sales').delete().eq('id', id);
     if(error) throw error;
     await loadAll();
@@ -804,7 +817,6 @@ function attachFinishWipModalEvents(w){
     const finishQty = Math.min(w.qty, Math.max(1, +qtyInput.value || 1));
     const pendingRecipes = (cp.recipesUsed||[]).filter(it => !w.usedRecipeIds.includes(it.recipeId));
     const pendingIngredients = (cp.directIngredients||[]).filter(it => !w.usedIngredientIds.includes(it.ingredientId));
-    const pkgConsumption = packagingConsumptionForCostProduct(cp, finishQty);
     const recLines = pendingRecipes.map(it => {
       const r = rMap[it.recipeId]; if(!r) return '';
       const amt = it.qty*finishQty;
@@ -817,14 +829,10 @@ function attachFinishWipModalEvents(w){
       const after = (ing.currentStock||0) - amt;
       return `<div class="row" style="font-size:12.5px"><span class="row-label">Ingrediente pendiente: ${esc(ing.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
     }).join('');
-    const pkgLines = Object.entries(pkgConsumption).map(([pid, amt]) => {
-      const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return '';
-      const after = (pk.currentStock||0) - amt;
-      return `<div class="row" style="font-size:12.5px"><span class="row-label">Packaging: ${esc(pk.name)} (-${amt})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">quedan ${after}</span></div>`;
-    }).join('');
     const remaining = w.qty - finishQty;
     document.getElementById('wip-finish-preview').innerHTML = `
-      ${recLines || ingLines || pkgLines ? `<div class="field-label" style="margin-bottom:4px">Falta descontar (para ${finishQty} unidad${finishQty>1?'es':''}):</div>${recLines}${ingLines}${pkgLines}` : `<div class="empty" style="padding:8px 0">No queda nada pendiente, solo falta sumar el packaging y el stock final.</div>`}
+      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:6px">El pote ya se descontó cuando arrancó este lote, no se vuelve a descontar acá.</div>
+      ${recLines || ingLines ? `<div class="field-label" style="margin-bottom:4px">Falta descontar (para ${finishQty} unidad${finishQty>1?'es':''}):</div>${recLines}${ingLines}` : `<div class="empty" style="padding:8px 0">No queda nada pendiente, solo falta sumar el stock final.</div>`}
       ${remaining>0 ? `<div style="font-size:12.5px;color:var(--chocoSoft);margin-top:8px">Van a quedar ${remaining} unidad${remaining>1?'es':''} todavía en preparación.</div>` : ''}
     `;
   };
@@ -847,13 +855,8 @@ function attachFinishWipModalEvents(w){
         if(error) throw error;
         if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
       }));
-      const pkgConsumption = packagingConsumptionForCostProduct(cp, finishQty);
-      await Promise.all(Object.entries(pkgConsumption).map(async ([pid, amt]) => {
-        const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return;
-        const { data: newStock, error } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: pid, p_delta: -amt });
-        if(error) throw error;
-        if(pk.lowStockAlert>0 && newStock<=pk.lowStockAlert) warnings.push(pk.name);
-      }));
+      // El pote (packaging tipo "producción") ya se descontó cuando se marcó
+      // este lote como incompleto — no se vuelve a descontar al terminar.
       if(p){
         const { error } = await sb.rpc('adjust_stock', { p_product_id: w.productId, p_delta: finishQty });
         if(error) throw error;
@@ -1008,7 +1011,7 @@ function renderIngredients(){
                 <div class="row"><span class="row-label">Precio pagado</span><span class="row-value">${money(ing.price)}</span></div>
                 <div class="row"><span class="row-label">Cantidad del envase</span><span class="row-value">${ing.packageQty} ${UNIT_LABEL[ing.unit]}</span></div>
                 <div class="row"><span class="row-label">Costo por ${UNIT_LABEL[ing.unit]}</span><span class="row-value bold" style="color:${COLORS.menta}">${money(costUnit)}</span></div>
-                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock actual</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${ing.currentStock||0} ${UNIT_LABEL[ing.unit]}</span></div>
+                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock actual</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${fmtQty(ing.currentStock)} ${UNIT_LABEL[ing.unit]}</span></div>
               </div>
             </div>
           `;
@@ -1058,7 +1061,7 @@ function renderRecipes(){
               <div class="num" style="margin-top:10px;font-size:13.5px">
                 <div class="row"><span class="row-label">Costo total (del lote)</span><span class="row-value bold">${money(total)}</span></div>
                 <div class="row"><span class="row-label">Costo por ${r.yieldUnit==='porciones'?'porción':(UNIT_LABEL[r.yieldUnit]||r.yieldUnit)}</span><span class="row-value" style="color:${COLORS.menta}">${money(perUnit)}</span></div>
-                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock preparado</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${(r.currentStock||0).toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit}</span></div>
+                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock preparado</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${fmtQty(r.currentStock)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit}</span></div>
               </div>
             </div>
           `;
@@ -1158,7 +1161,7 @@ function renderCosting(){
           const low = p.lowStockAlert>0 && (p.currentStock||0)<=p.lowStockAlert;
           return `
           <div class="row" style="font-size:13.5px">
-            <span class="row-label">${esc(p.name)} ${low?`<span class="pill" style="background:${COLORS.frutilla}1c;color:${COLORS.frutillaDark}">Stock bajo</span>`:''} <span class="num" style="color:var(--chocoSoft)">— stock: ${p.currentStock||0}</span></span>
+            <span class="row-label">${esc(p.name)} ${low?`<span class="pill" style="background:${COLORS.frutilla}1c;color:${COLORS.frutillaDark}">Stock bajo</span>`:''} <span class="num" style="color:var(--chocoSoft)">— stock: ${fmtQty(p.currentStock)}</span></span>
             <span style="display:flex;align-items:center;gap:10px">
               <span class="row-value num">${money(p.cost)}</span>
               <button class="btn-icon" data-edit-packaging="${p.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
@@ -1290,9 +1293,14 @@ function modalHeader(title){
 /* ---- Nueva venta ---- */
 let SALE_ITEMS = [{ productId:'', qty:1 }];
 let SALE_DISCOUNT = 0;
+let SALE_BAGS = [];
+function saleBagPackagingOptions(){
+  return DATA.packagingCatalog.filter(p => p.consumptionType === 'venta');
+}
 function saleModalHtml(){
   SALE_ITEMS = [{ productId:'', qty:1 }];
   SALE_DISCOUNT = 0;
+  SALE_BAGS = [];
   return renderSaleModalBody();
 }
 function renderSaleModalBody(){
@@ -1338,6 +1346,28 @@ function renderSaleModalBody(){
       }).join('')}
     </div>
     <button class="btn btn-ghost" id="sale-add-row" style="margin-bottom:14px">${ICONS.plus} Agregar producto</button>
+
+    ${saleBagPackagingOptions().length>0 ? `
+      <div class="field-label" style="margin:10px 0 6px">Bolsas usadas (opcional)</div>
+      <div id="sale-bags">
+        ${SALE_BAGS.map((row,i) => {
+          const pk = DATA.packagingCatalog.find(p=>p.id===row.packagingId);
+          const over = pk && row.qty > (pk.currentStock||0);
+          return `
+            <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+              <select class="input sale-bag-type" data-idx="${i}" style="flex:2">
+                <option value="">Elegir bolsa...</option>
+                ${saleBagPackagingOptions().map(pk=>`<option value="${pk.id}" ${pk.id===row.packagingId?'selected':''}>${esc(pk.name)} (stock: ${fmtQty(pk.currentStock)})</option>`).join('')}
+              </select>
+              <input type="number" min="1" class="input sale-bag-qty" data-idx="${i}" value="${row.qty}" style="width:64px;border-color:${over?COLORS.frutilla:'var(--line)'}"/>
+              <button class="btn-icon sale-bag-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+            </div>
+          `;
+        }).join('')}
+      </div>
+      <button class="btn btn-ghost" id="sale-add-bag" style="margin-bottom:14px">${ICONS.plus} Agregar bolsa</button>
+    ` : ''}
+
     <div class="card" style="background:var(--cream);border:none">
       <div class="num row" style="font-size:14px"><span class="row-label">Costo total</span><span>${money(cost)}</span></div>
       <div class="num row" style="font-size:14px"><span class="row-label">Precio total</span><span>${money(revenue)}</span></div>
@@ -1361,6 +1391,11 @@ function attachSaleModalEvents(){
   document.getElementById('sale-save').onclick = saveSale;
   const discEl = document.getElementById('sale-discount');
   if(discEl) discEl.onchange = () => { SALE_DISCOUNT = +discEl.value || 0; refreshSaleModal(); };
+  const addBagBtn = document.getElementById('sale-add-bag');
+  if(addBagBtn) addBagBtn.onclick = () => { SALE_BAGS.push({packagingId:'', qty:1}); refreshSaleModal(); };
+  document.querySelectorAll('.sale-bag-type').forEach(el => el.onchange = () => { SALE_BAGS[+el.dataset.idx].packagingId = el.value; refreshSaleModal(); });
+  document.querySelectorAll('.sale-bag-qty').forEach(el => el.onchange = () => { SALE_BAGS[+el.dataset.idx].qty = parseInt(el.value)||1; refreshSaleModal(); });
+  document.querySelectorAll('.sale-bag-remove').forEach(el => el.onclick = () => { SALE_BAGS.splice(+el.dataset.idx,1); refreshSaleModal(); });
 
   const clientInput = document.getElementById('sale-client');
   const suggBox = document.getElementById('sale-client-suggestions');
@@ -1457,6 +1492,16 @@ async function saveSale(){
     for(const it of valid){
       if(it.product.trackStock){
         await sb.rpc('adjust_stock', { p_product_id: it.productId, p_delta: -it.qty });
+      }
+    }
+
+    const validBags = SALE_BAGS.filter(b => b.packagingId && b.qty>0);
+    if(validBags.length){
+      const bagRows = validBags.map(b => ({ sale_id: saleRow.id, packaging_id: b.packagingId, qty: b.qty }));
+      const { error: bagsErr } = await sb.from('sale_bags').insert(bagRows);
+      if(bagsErr) throw bagsErr;
+      for(const b of validBags){
+        await sb.rpc('adjust_packaging_stock', { p_packaging_id: b.packagingId, p_delta: -b.qty });
       }
     }
 
@@ -1832,6 +1877,13 @@ function packagingItemModalHtml(editing){
       <div style="flex:1" class="field"><div class="field-label">Stock actual (cuántos tenés)</div><input type="number" class="input" id="pk-stock" value="${editing?.currentStock ?? 0}"/></div>
       <div style="flex:1" class="field"><div class="field-label">Avisar si baja de</div><input type="number" class="input" id="pk-lowstock" value="${editing?.lowStockAlert ?? 0}"/></div>
     </div>
+    <div class="field"><div class="field-label">¿Cuándo se descuenta el stock?</div>
+      <select class="input" id="pk-consumption">
+        <option value="produccion" ${(!editing||editing.consumptionType==='produccion')?'selected':''}>Al producir el postre (ej: Pote)</option>
+        <option value="venta" ${editing?.consumptionType==='venta'?'selected':''}>Al cargar la venta, eligiendo cuál (ej: Bolsa chica/grande)</option>
+        <option value="ninguno" ${editing?.consumptionType==='ninguno'?'selected':''}>Nunca automático (solo se suma su costo, ej: Sticker, Tarjeta)</option>
+      </select>
+    </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
       <button class="btn btn-primary" id="pk-save">Guardar</button>
@@ -1845,8 +1897,9 @@ function attachPackagingItemModalEvents(editing){
     const cost = +document.getElementById('pk-cost').value || 0;
     const currentStock = +document.getElementById('pk-stock').value || 0;
     const lowStockAlert = +document.getElementById('pk-lowstock').value || 0;
+    const consumptionType = document.getElementById('pk-consumption').value;
     if(!name){ alert('Poné un nombre.'); return; }
-    const payload = { name, cost, current_stock: currentStock, low_stock_alert: lowStockAlert };
+    const payload = { name, cost, current_stock: currentStock, low_stock_alert: lowStockAlert, consumption_type: consumptionType };
     const { error } = editing
       ? await sb.from('packaging_catalog').update(payload).eq('id', editing.id)
       : await sb.from('packaging_catalog').insert(payload);
@@ -2127,6 +2180,15 @@ function attachStockMovementModalEvents(){
           if(error) throw error;
           if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
         }));
+        // El packaging tipo "producción" (el pote) se descuenta ya, apenas arranca
+        // el lote, sea completo o incompleto — un pote por postre en preparación.
+        const pkgConsumption = packagingConsumptionForCostProduct(cp, qty);
+        await Promise.all(Object.entries(pkgConsumption).map(async ([pid, amt]) => {
+          const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return;
+          const { data: newStock, error } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: pid, p_delta: -amt });
+          if(error) throw error;
+          if(pk.lowStockAlert>0 && newStock<=pk.lowStockAlert) warnings.push(pk.name);
+        }));
         const { error: wipErr } = await sb.from('work_in_progress').insert({ product_id: productId, qty, date: todayISO(), used_ingredient_ids: checkedIngIds, used_recipe_ids: checkedRecipeIds });
         if(wipErr) throw wipErr;
         await loadAll();
@@ -2214,7 +2276,7 @@ function renderShopping(){
       ${lowIngredients.length===0 ? `<div class="empty" style="padding:8px 0">Por ahora no hay ningún ingrediente bajo — todo en orden.</div>` :
         lowIngredients.map(ing => `
           <div class="row" style="font-size:14px;align-items:center;flex-wrap:wrap;gap:6px">
-            <span class="row-label">${esc(ing.name)} <span class="num" style="color:${COLORS.frutillaDark}">— quedan ${(ing.currentStock||0).toFixed(1)} ${UNIT_LABEL[ing.unit]} (aviso en ${ing.lowStockAlert})</span></span>
+            <span class="row-label">${esc(ing.name)} <span class="num" style="color:${COLORS.frutillaDark}">— quedan ${fmtQty(ing.currentStock)} ${UNIT_LABEL[ing.unit]} (aviso en ${ing.lowStockAlert})</span></span>
             <button class="btn btn-ghost" data-quick-purchase-ingredient="${ing.id}" style="padding:5px 10px;font-size:12.5px">${ICONS.plus} Ya compré</button>
           </div>
         `).join('')

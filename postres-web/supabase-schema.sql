@@ -256,6 +256,17 @@ alter table recipes add column if not exists low_stock_alert numeric not null de
 
 alter table packaging_catalog add column if not exists current_stock numeric not null default 0;
 alter table packaging_catalog add column if not exists low_stock_alert numeric not null default 0;
+alter table packaging_catalog add column if not exists consumption_type text not null default 'produccion';
+
+create table if not exists sale_bags (
+  id uuid primary key default gen_random_uuid(),
+  sale_id uuid not null references sales(id) on delete cascade,
+  packaging_id uuid references packaging_catalog(id) on delete set null,
+  qty numeric not null
+);
+alter table sale_bags enable row level security;
+create policy "anon full access" on sale_bags for all using (true) with check (true);
+alter publication supabase_realtime add table sale_bags;
 
 create table if not exists work_in_progress (
   id uuid primary key default gen_random_uuid(),
