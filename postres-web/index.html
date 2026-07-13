@@ -82,19 +82,20 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--frutilla);outlin
 .loading-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;color:var(--chocoSoft);font-weight:600}
 
 .mobile-topbar{display:none}
-.bottomnav{display:none}
+.mobile-navbar{display:none}
 
 @media (max-width:760px){
   .sidebar{display:none}
-  .mobile-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:54px;background:var(--choco);color:#fff;align-items:center;justify-content:space-between;padding:0 14px;z-index:60}
+  .mobile-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:54px;background:var(--choco);color:#fff;align-items:center;justify-content:space-between;padding:0 14px;z-index:61}
   .mobile-topbar .brand{padding:0;font-size:17px}
   .mobile-topbar .user-pill{font-size:12px;font-weight:700;color:#d8c9bb;display:flex;align-items:center;gap:8px}
   .mobile-topbar .logout-icon{background:none;border:none;color:#d8c9bb;display:flex;padding:4px}
-  .main{padding:68px 14px 86px;max-width:100%}
-  .bottomnav{display:flex;position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);z-index:60;padding:4px 2px env(safe-area-inset-bottom,4px);overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .bottomnav button{flex:0 0 auto;min-width:64px;display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;color:var(--chocoSoft);font-size:10.5px;font-weight:700;padding:6px 8px;position:relative}
-  .bottomnav button.active{color:var(--frutilla)}
-  .bottomnav .dot{position:absolute;top:2px;right:22%;width:7px;height:7px;border-radius:50%;background:var(--frutilla)}
+  .mobile-navbar{display:flex;position:fixed;top:54px;left:0;right:0;background:var(--choco);z-index:60;padding:6px 6px calc(6px + env(safe-area-inset-top,0px)) 6px;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;box-shadow:0 4px 10px rgba(43,27,20,.15)}
+  .mobile-navbar button{flex:0 0 auto;min-width:72px;display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:none;color:#d8c9bb;font-size:11.5px;font-weight:700;padding:11px 14px;border-radius:12px;position:relative}
+  .mobile-navbar button svg{width:22px;height:22px}
+  .mobile-navbar button.active{background:rgba(255,255,255,.14);color:#fff}
+  .mobile-navbar .dot{position:absolute;top:7px;right:12px;width:8px;height:8px;border-radius:50%;background:var(--frutilla)}
+  .main{padding:132px 14px 24px;max-width:100%}
   .statgrid{flex-direction:column}
   .stat{min-width:100%}
   .header-title{font-size:22px}
@@ -148,6 +149,7 @@ let MODAL = null;
 let SEARCH_Q = '';
 let LOADED = false;
 let SAVING = false;
+let DASHBOARD_EXPANDED = false;
 
 function ownerName(id){ return (DATA.owners.find(o=>o.id===id)||{}).name || id; }
 function clientMap(){ return Object.fromEntries(DATA.clients.map(c=>[c.id,c])); }
@@ -177,7 +179,7 @@ async function loadAll(){
     id:s.id, date:s.date, clientId:s.client_id, paymentMethod:s.payment_method, discount:+s.discount,
     items:(s.sale_items||[]).map(it=>({productId:it.product_id, productName:it.product_name, ownerId:it.owner_id, qty:it.qty, cost:+it.cost, price:+it.price}))
   }));
-  if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category, ingredientId:p.ingredient_id, ingredientQty:p.ingredient_qty!=null?+p.ingredient_qty:null}));
+  if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category, ingredientId:p.ingredient_id, ingredientQty:p.ingredient_qty!=null?+p.ingredient_qty:null, packagingId:p.packaging_id, packagingQty:p.packaging_qty!=null?+p.packaging_qty:null}));
   if(loyaltyR.data) DATA.loyalty = {threshold:loyaltyR.data.threshold, reward:loyaltyR.data.reward};
   if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, packageQty:+i.package_qty, unit:i.unit, currentStock:+i.current_stock||0, lowStockAlert:+i.low_stock_alert||0}));
   if(recipesR.data) DATA.recipes = recipesR.data.map(r=>({
@@ -234,11 +236,11 @@ function computeMetrics(){
   for(const pur of DATA.purchases){
     const mk = monthKey(pur.date);
     byMonth[mk] = byMonth[mk] || { revenue:0, cost:0, grossProfit:0, profit:0, grossByOwner:{}, byOwner:{} };
-    // Las compras de "Ingredientes" NO se restan de la ganancia acá: ese costo ya está
-    // reflejado en el "Costo del mes" a través del costo por unidad de cada producto vendido.
-    // Restarlo también acá sería contarlo dos veces. Sí se restan los demás gastos
-    // (packaging, delivery, marketing, otros) porque esos no forman parte del costo por unidad.
-    if(pur.category === 'Ingredientes') continue;
+    // "Ingredientes" y "Packaging" ya están reflejados en el costo por unidad de cada
+    // producto vendido (vía su receta de costeo), así que no se restan de nuevo acá.
+    // Restarlos también acá sería contarlos dos veces. Sí se restan los demás gastos
+    // (delivery, marketing, otros) porque esos no forman parte del costo por unidad.
+    if(pur.category === 'Ingredientes' || pur.category === 'Packaging') continue;
     byMonth[mk].profit -= pur.amount;
     byMonth[mk].byOwner[pur.ownerId] = (byMonth[mk].byOwner[pur.ownerId]||0) - pur.amount;
   }
@@ -343,6 +345,14 @@ function render(){
         <div class="brand serif">${ICONS.cake} Postres</div>
         <div class="user-pill">${esc(ownerName(currentUser()))} <button class="logout-icon" id="mobile-logout">${ICONS.logout}</button></div>
       </div>
+      <div class="mobile-navbar">
+        ${NAV.map(n => `
+          <button class="${TAB===n.id?'active':''}" data-nav="${n.id}">
+            ${n.icon}<span>${n.label}</span>
+            ${n.id==='products' && lowStock.length>0 ? `<span class="dot"></span>` : ''}
+          </button>
+        `).join('')}
+      </div>
       <div class="sidebar">
         <div class="brand serif">${ICONS.cake} Postres</div>
         ${NAV.map(n => `
@@ -357,14 +367,6 @@ function render(){
         </div>
       </div>
       <div class="main" id="main"></div>
-      <div class="bottomnav">
-        ${NAV.map(n => `
-          <button class="${TAB===n.id?'active':''}" data-nav="${n.id}">
-            ${n.icon}<span>${n.label}</span>
-            ${n.id==='products' && lowStock.length>0 ? `<span class="dot"></span>` : ''}
-          </button>
-        `).join('')}
-      </div>
     </div>
   `;
 
@@ -420,7 +422,12 @@ function renderDashboard(){
   const counts = {};
   for(const s of DATA.sales) for(const it of s.items) counts[it.productName]=(counts[it.productName]||0)+it.qty;
   const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-  const bestProduct = entries.length ? {name:entries[0][0], qty:entries[0][1]} : null;
+  const topProducts = entries.slice(0,3).map(([name,qty])=>({name,qty}));
+
+  const gastosDelMes = DATA.purchases.filter(p=>monthKey(p.date)===currentMonth).reduce((a,p)=>a+p.amount,0);
+  const gastosOperativos = thisMonth.grossProfit - thisMonth.profit;
+  const margenBruto = thisMonth.revenue>0 ? Math.round((thisMonth.grossProfit/thisMonth.revenue)*100) : 0;
+  const margenNeto = thisMonth.revenue>0 ? Math.round((thisMonth.profit/thisMonth.revenue)*100) : 0;
 
   return `
     <div class="header-row">
@@ -429,19 +436,8 @@ function renderDashboard(){
 
     <div class="statgrid">
       <div class="card stat"><div class="stat-label">Ventas del mes ${ICONS.bag}</div><div class="stat-value num">${money(thisMonth.revenue)}</div></div>
-      <div class="card stat"><div class="stat-label">Costo del mes ${ICONS.package}</div><div class="stat-value num">${money(thisMonth.cost)}</div></div>
-      <div class="card stat"><div class="stat-label">Ganancia bruta ${ICONS.trending}</div><div class="stat-value num" style="color:${thisMonth.grossProfit>=0?COLORS.menta:COLORS.frutillaDark}">${money(thisMonth.grossProfit)}</div><div class="stat-sub">Ventas - costo de productos</div></div>
-      <div class="card stat"><div class="stat-label">Ganancia neta ${ICONS.trending}</div><div class="stat-value num" style="color:${thisMonth.profit>=0?COLORS.menta:COLORS.frutillaDark}">${money(thisMonth.profit)}</div><div class="stat-sub">Ganancia bruta - gastos</div></div>
+      <div class="card stat"><div class="stat-label">Ganancia neta ${ICONS.trending}</div><div class="stat-value num" style="color:${thisMonth.profit>=0?COLORS.menta:COLORS.frutillaDark}">${money(thisMonth.profit)}</div></div>
       <div class="card stat"><div class="stat-label">Postres vendidos (total) ${ICONS.cake}</div><div class="stat-value num">${totalUnits}</div></div>
-    </div>
-
-    <div class="statgrid">
-      ${DATA.owners.map(o => `
-        <div class="card" style="flex:1;min-width:220px">
-          <div class="stat-label">Ganancia BRUTA de ${esc(o.name)} este mes</div>
-          <div class="num" style="font-size:24px;font-weight:700;margin-top:6px;color:${(thisMonth.grossByOwner[o.id]||0)>=0?COLORS.menta:COLORS.frutillaDark}">${money(thisMonth.grossByOwner[o.id]||0)}</div>
-        </div>
-      `).join('')}
     </div>
 
     <div class="statgrid">
@@ -452,6 +448,10 @@ function renderDashboard(){
         </div>
       `).join('')}
     </div>
+
+    <button class="btn btn-ghost" id="dash-toggle-metrics" style="margin-bottom:18px">${DASHBOARD_EXPANDED?'▲ Ocultar métricas detalladas':'▼ Ver métricas detalladas (costos, márgenes, comparativas)'}</button>
+
+    ${DASHBOARD_EXPANDED ? renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margenBruto, margenNeto) : ''}
 
     ${lowStock.length>0 ? `
       <div class="card" style="margin-bottom:18px;border-color:${COLORS.frutilla};background:#FFF4F1">
@@ -477,9 +477,87 @@ function renderDashboard(){
           `; }).join('')}
       </div>
       <div class="card" style="flex:1;min-width:220px">
-        <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:12px">Producto estrella</div>
-        ${bestProduct ? `<div style="font-size:17px;font-weight:700">${esc(bestProduct.name)}</div><div class="num" style="color:var(--chocoSoft);margin-top:4px">${bestProduct.qty} vendidos en total</div>` : `<div class="empty" style="padding:0;text-align:left">Sin datos todavía.</div>`}
+        <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:12px">Top 3 postres más vendidos</div>
+        ${topProducts.length===0 ? `<div class="empty" style="padding:0;text-align:left">Sin datos todavía.</div>` :
+          topProducts.map((tp,i) => `
+            <div style="display:flex;align-items:center;gap:10px;padding:6px 0">
+              <div style="width:22px;height:22px;border-radius:999px;background:${i===0?COLORS.dulce:i===1?COLORS.frutilla:COLORS.menta};color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
+              <div style="flex:1">
+                <div style="font-weight:700;font-size:14.5px">${esc(tp.name)}</div>
+                <div class="num" style="color:var(--chocoSoft);font-size:12.5px">${tp.qty} vendidos</div>
+              </div>
+            </div>
+          `).join('')}
       </div>
+    </div>
+  `;
+}
+
+function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margenBruto, margenNeto){
+  const maxOwnerGross = Math.max(1, ...DATA.owners.map(o => Math.abs(thisMonth.grossByOwner[o.id]||0)));
+  const currentMonth = monthKey(todayISO());
+  const monthPurchases = DATA.purchases.filter(p => monthKey(p.date) === currentMonth);
+  const byCategory = {};
+  for(const p of monthPurchases) byCategory[p.category] = (byCategory[p.category]||0) + p.amount;
+  const catEntries = Object.entries(byCategory).sort((a,b)=>b[1]-a[1]);
+  const catColors = [COLORS.frutilla, COLORS.dulce, COLORS.menta, COLORS.chocoSoft, '#9b7fb0'];
+  const totalCats = catEntries.reduce((a,[,v])=>a+v,0) || 1;
+  let acc = 0;
+  const gradientStops = catEntries.map(([cat,val],i) => {
+    const start = (acc/totalCats)*100; acc += val;
+    const end = (acc/totalCats)*100;
+    return `${catColors[i%catColors.length]} ${start}% ${end}%`;
+  }).join(', ');
+
+  return `
+    <div class="card" style="margin-bottom:18px">
+      <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:16px">Métricas detalladas del mes</div>
+
+      <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;margin-bottom:20px">
+        <div style="width:120px;height:120px;border-radius:999px;flex-shrink:0;background:conic-gradient(${COLORS.menta} 0% ${margenNeto}%, ${COLORS.line} ${margenNeto}% 100%);display:flex;align-items:center;justify-content:center">
+          <div style="width:88px;height:88px;border-radius:999px;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center">
+            <div class="num" style="font-size:22px;font-weight:800;color:${COLORS.menta}">${margenNeto}%</div>
+            <div style="font-size:10px;color:var(--chocoSoft);text-align:center">margen<br/>neto</div>
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div class="row" style="font-size:13.5px"><span class="row-label">Ventas totales</span><span class="row-value num">${money(thisMonth.revenue)}</span></div>
+          <div class="row" style="font-size:13.5px"><span class="row-label">Costo de productos vendidos</span><span class="row-value num">${money(thisMonth.cost)}</span></div>
+          <div class="row" style="font-size:13.5px"><span class="row-label">Ganancia bruta (margen ${margenBruto}%)</span><span class="row-value num" style="color:${COLORS.menta}">${money(thisMonth.grossProfit)}</span></div>
+          <div class="row" style="font-size:13.5px"><span class="row-label">Gastos operativos (packaging aparte, delivery, etc.)</span><span class="row-value num" style="color:${COLORS.frutillaDark}">-${money(gastosOperativos)}</span></div>
+          <div class="row" style="font-size:14px;border-top:1px solid var(--line);margin-top:4px;padding-top:6px"><span class="row-label" style="font-weight:700">Ganancia neta (margen ${margenNeto}%)</span><span class="row-value bold num" style="color:${COLORS.menta}">${money(thisMonth.profit)}</span></div>
+        </div>
+      </div>
+
+      <div class="field-label" style="margin-bottom:8px">Ganancia bruta por persona</div>
+      ${DATA.owners.map(o => {
+        const val = thisMonth.grossByOwner[o.id]||0;
+        const pct = Math.round((Math.abs(val)/maxOwnerGross)*100);
+        const color = o.id==='mama' ? COLORS.dulce : COLORS.frutilla;
+        return `
+          <div style="margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px"><span>${esc(o.name)}</span><span class="num" style="font-weight:700">${money(val)}</span></div>
+            <div style="height:10px;background:var(--cream);border-radius:999px;overflow:hidden"><div style="height:100%;width:${pct}%;background:${color}"></div></div>
+          </div>
+        `;
+      }).join('')}
+
+      ${catEntries.length>0 ? `
+        <div class="field-label" style="margin:16px 0 8px">Gastos del mes por categoría (${money(gastosDelMes)} total)</div>
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+          <div style="width:80px;height:80px;border-radius:999px;flex-shrink:0;background:conic-gradient(${gradientStops})"></div>
+          <div style="flex:1;min-width:180px">
+            ${catEntries.map(([cat,val],i) => `
+              <div style="display:flex;align-items:center;gap:6px;font-size:12.5px;padding:2px 0">
+                <div style="width:9px;height:9px;border-radius:999px;background:${catColors[i%catColors.length]};flex-shrink:0"></div>
+                <span style="flex:1">${esc(cat)}</span>
+                <span class="num" style="color:var(--chocoSoft)">${Math.round((val/totalCats)*100)}%</span>
+                <span class="num" style="font-weight:700;min-width:70px;text-align:right">${money(val)}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -489,7 +567,7 @@ function renderExpenseSummary(){
   const monthPurchases = DATA.purchases.filter(p => monthKey(p.date) === currentMonth);
   if(monthPurchases.length === 0) return '';
   const total = monthPurchases.reduce((a,p)=>a+p.amount, 0);
-  const totalIngredientes = monthPurchases.filter(p=>p.category==='Ingredientes').reduce((a,p)=>a+p.amount,0);
+  const totalIngredientes = monthPurchases.filter(p=>p.category==='Ingredientes'||p.category==='Packaging').reduce((a,p)=>a+p.amount,0);
   const totalOperativos = total - totalIngredientes;
   const byCategoryOwner = {};
   for(const p of monthPurchases){
@@ -505,7 +583,7 @@ function renderExpenseSummary(){
         <div class="serif" style="font-weight:700;font-size:16px">Gastos del mes</div>
         <span class="num" style="font-weight:800;color:${COLORS.frutillaDark}">-${money(total)}</span>
       </div>
-      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">De estos, <span class="num" style="font-weight:700">${money(totalOperativos)}</span> impactan en la Ganancia Neta. Los <span class="num" style="font-weight:700">${money(totalIngredientes)}</span> de Ingredientes no se restan de nuevo acá, porque ya están contemplados en el "Costo del mes" de cada venta.</div>
+      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">De estos, <span class="num" style="font-weight:700">${money(totalOperativos)}</span> impactan en la Ganancia Neta. Los <span class="num" style="font-weight:700">${money(totalIngredientes)}</span> de Ingredientes y Packaging no se restan de nuevo acá, porque ya están contemplados en el "Costo del mes" de cada venta.</div>
       ${rows.map(r => `
         <div class="row" style="font-size:13.5px">
           <span class="row-label">${esc(r.category)} <span style="color:${r.ownerId==='mama'?COLORS.dulce:COLORS.frutilla};font-weight:700">(${esc(ownerName(r.ownerId))})</span></span>
@@ -700,33 +778,11 @@ function finishWipModalHtml(w){
   if(!cp){
     return `${modalHeader('Terminar producción')}<div class="empty">No se encontró la receta de costeo vinculada.</div><div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn btn-ghost" id="modal-cancel">Cerrar</button></div>`;
   }
-  const rMap = recipeMap(), iMap = ingredientMap();
-  const pendingRecipes = (cp.recipesUsed||[]).filter(it => !w.usedRecipeIds.includes(it.recipeId));
-  const pendingIngredients = (cp.directIngredients||[]).filter(it => !w.usedIngredientIds.includes(it.ingredientId));
-  const pkgConsumption = packagingConsumptionForCostProduct(cp, w.qty);
-
-  const recLines = pendingRecipes.map(it => {
-    const r = rMap[it.recipeId]; if(!r) return '';
-    const amt = it.qty*w.qty;
-    const after = (r.currentStock||0) - amt;
-    return `<div class="row" style="font-size:12.5px"><span class="row-label">Receta pendiente: ${esc(r.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
-  }).join('');
-  const ingLines = pendingIngredients.map(it => {
-    const ing = iMap[it.ingredientId]; if(!ing) return '';
-    const amt = it.qty*w.qty;
-    const after = (ing.currentStock||0) - amt;
-    return `<div class="row" style="font-size:12.5px"><span class="row-label">Ingrediente pendiente: ${esc(ing.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
-  }).join('');
-  const pkgLines = Object.entries(pkgConsumption).map(([pid, amt]) => {
-    const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return '';
-    const after = (pk.currentStock||0) - amt;
-    return `<div class="row" style="font-size:12.5px"><span class="row-label">Packaging: ${esc(pk.name)} (-${amt})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">quedan ${after}</span></div>`;
-  }).join('');
-
   return `
     ${modalHeader('Terminar: ' + (p?p.name:''))}
-    <div style="font-size:13.5px;color:var(--chocoSoft);margin-bottom:10px">Cantidad: ${w.qty}. Al confirmar, se descuenta lo que faltaba y se suma al stock de venta.</div>
-    ${recLines || ingLines || pkgLines ? `<div class="field-label" style="margin-bottom:4px">Falta descontar:</div>${recLines}${ingLines}${pkgLines}` : `<div class="empty" style="padding:8px 0">No queda nada pendiente, solo falta sumar el packaging y el stock final.</div>`}
+    <div style="font-size:13.5px;color:var(--chocoSoft);margin-bottom:10px">Este lote tiene ${w.qty} unidades incompletas. Decime cuántas terminó ahora (pueden ser todas o solo algunas).</div>
+    <div class="field"><div class="field-label">Cuántas completó</div><input type="number" min="1" max="${w.qty}" class="input" id="wip-finish-qty" value="${w.qty}"/></div>
+    <div id="wip-finish-preview"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
       <button class="btn btn-primary" id="wip-finish-save">Confirmar y sumar stock</button>
@@ -735,40 +791,79 @@ function finishWipModalHtml(w){
 }
 function attachFinishWipModalEvents(w){
   document.getElementById('modal-cancel').onclick = closeModal;
+  const p = DATA.products.find(p=>p.id===w.productId);
+  const cp = p ? DATA.costProducts.find(cp=>cp.id===p.costProductId) : null;
   const btn = document.getElementById('wip-finish-save');
-  if(!btn) return;
+  if(!btn || !cp) return;
+  const rMap = recipeMap(), iMap = ingredientMap();
+  const qtyInput = document.getElementById('wip-finish-qty');
+
+  const updatePreview = () => {
+    const finishQty = Math.min(w.qty, Math.max(1, +qtyInput.value || 1));
+    const pendingRecipes = (cp.recipesUsed||[]).filter(it => !w.usedRecipeIds.includes(it.recipeId));
+    const pendingIngredients = (cp.directIngredients||[]).filter(it => !w.usedIngredientIds.includes(it.ingredientId));
+    const pkgConsumption = packagingConsumptionForCostProduct(cp, finishQty);
+    const recLines = pendingRecipes.map(it => {
+      const r = rMap[it.recipeId]; if(!r) return '';
+      const amt = it.qty*finishQty;
+      const after = (r.currentStock||0) - amt;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">Receta pendiente: ${esc(r.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
+    }).join('');
+    const ingLines = pendingIngredients.map(it => {
+      const ing = iMap[it.ingredientId]; if(!ing) return '';
+      const amt = it.qty*finishQty;
+      const after = (ing.currentStock||0) - amt;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">Ingrediente pendiente: ${esc(ing.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
+    }).join('');
+    const pkgLines = Object.entries(pkgConsumption).map(([pid, amt]) => {
+      const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return '';
+      const after = (pk.currentStock||0) - amt;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">Packaging: ${esc(pk.name)} (-${amt})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">quedan ${after}</span></div>`;
+    }).join('');
+    const remaining = w.qty - finishQty;
+    document.getElementById('wip-finish-preview').innerHTML = `
+      ${recLines || ingLines || pkgLines ? `<div class="field-label" style="margin-bottom:4px">Falta descontar (para ${finishQty} unidad${finishQty>1?'es':''}):</div>${recLines}${ingLines}${pkgLines}` : `<div class="empty" style="padding:8px 0">No queda nada pendiente, solo falta sumar el packaging y el stock final.</div>`}
+      ${remaining>0 ? `<div style="font-size:12.5px;color:var(--chocoSoft);margin-top:8px">Van a quedar ${remaining} unidad${remaining>1?'es':''} todavía en preparación.</div>` : ''}
+    `;
+  };
+  qtyInput.oninput = updatePreview;
+  updatePreview();
+
   btn.onclick = async () => {
-    const p = DATA.products.find(p=>p.id===w.productId);
-    const cp = p ? DATA.costProducts.find(cp=>cp.id===p.costProductId) : null;
+    const finishQty = Math.min(w.qty, Math.max(1, +qtyInput.value || 1));
     try{
       let warnings = [];
-      if(cp){
-        await Promise.all((cp.directIngredients||[]).filter(it=>!w.usedIngredientIds.includes(it.ingredientId)).map(async it => {
-          const ing = DATA.ingredients.find(i=>i.id===it.ingredientId); if(!ing) return;
-          const { data: newStock, error } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: it.ingredientId, p_delta: -(it.qty*w.qty) });
-          if(error) throw error;
-          if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
-        }));
-        await Promise.all((cp.recipesUsed||[]).filter(it=>!w.usedRecipeIds.includes(it.recipeId)).map(async it => {
-          const r = DATA.recipes.find(r=>r.id===it.recipeId); if(!r) return;
-          const { data: newStock, error } = await sb.rpc('adjust_recipe_stock', { p_recipe_id: it.recipeId, p_delta: -(it.qty*w.qty) });
-          if(error) throw error;
-          if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
-        }));
-        const pkgConsumption = packagingConsumptionForCostProduct(cp, w.qty);
-        await Promise.all(Object.entries(pkgConsumption).map(async ([pid, amt]) => {
-          const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return;
-          const { data: newStock, error } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: pid, p_delta: -amt });
-          if(error) throw error;
-          if(pk.lowStockAlert>0 && newStock<=pk.lowStockAlert) warnings.push(pk.name);
-        }));
-      }
+      await Promise.all((cp.directIngredients||[]).filter(it=>!w.usedIngredientIds.includes(it.ingredientId)).map(async it => {
+        const ing = DATA.ingredients.find(i=>i.id===it.ingredientId); if(!ing) return;
+        const { data: newStock, error } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: it.ingredientId, p_delta: -(it.qty*finishQty) });
+        if(error) throw error;
+        if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
+      }));
+      await Promise.all((cp.recipesUsed||[]).filter(it=>!w.usedRecipeIds.includes(it.recipeId)).map(async it => {
+        const r = DATA.recipes.find(r=>r.id===it.recipeId); if(!r) return;
+        const { data: newStock, error } = await sb.rpc('adjust_recipe_stock', { p_recipe_id: it.recipeId, p_delta: -(it.qty*finishQty) });
+        if(error) throw error;
+        if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
+      }));
+      const pkgConsumption = packagingConsumptionForCostProduct(cp, finishQty);
+      await Promise.all(Object.entries(pkgConsumption).map(async ([pid, amt]) => {
+        const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return;
+        const { data: newStock, error } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: pid, p_delta: -amt });
+        if(error) throw error;
+        if(pk.lowStockAlert>0 && newStock<=pk.lowStockAlert) warnings.push(pk.name);
+      }));
       if(p){
-        const { error } = await sb.rpc('adjust_stock', { p_product_id: w.productId, p_delta: w.qty });
+        const { error } = await sb.rpc('adjust_stock', { p_product_id: w.productId, p_delta: finishQty });
         if(error) throw error;
       }
-      const { error: delErr } = await sb.from('work_in_progress').delete().eq('id', w.id);
-      if(delErr) throw delErr;
+      const remaining = w.qty - finishQty;
+      if(remaining > 0){
+        const { error } = await sb.from('work_in_progress').update({ qty: remaining }).eq('id', w.id);
+        if(error) throw error;
+      } else {
+        const { error } = await sb.from('work_in_progress').delete().eq('id', w.id);
+        if(error) throw error;
+      }
       await loadAll();
       closeModal();
       if(warnings.length) alert(`⚠ Ojo, quedaste con poco stock de: ${warnings.join(', ')}.`);
@@ -1064,6 +1159,7 @@ function renderCosting(){
             <span class="row-label">${esc(p.name)} ${low?`<span class="pill" style="background:${COLORS.frutilla}1c;color:${COLORS.frutillaDark}">Stock bajo</span>`:''} <span class="num" style="color:var(--chocoSoft)">— stock: ${p.currentStock||0}</span></span>
             <span style="display:flex;align-items:center;gap:10px">
               <span class="row-value num">${money(p.cost)}</span>
+              <button class="btn-icon" data-edit-packaging="${p.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
               <button class="btn-icon" data-remove-packaging="${p.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
             </span>
           </div>
@@ -1114,6 +1210,8 @@ async function removePackagingItem(id){
 
 /* ===================== EVENTOS DE TAB ===================== */
 function attachTabEvents(){
+  const dashToggle = document.getElementById('dash-toggle-metrics');
+  if(dashToggle) dashToggle.onclick = () => { DASHBOARD_EXPANDED = !DASHBOARD_EXPANDED; render(); };
   document.querySelectorAll('[data-open-modal]').forEach(b => b.onclick = () => { MODAL = { type: b.dataset.openModal }; renderModal(); });
   document.querySelectorAll('[data-remove-sale]').forEach(b => b.onclick = () => removeSale(b.dataset.removeSale));
   document.querySelectorAll('[data-remove-product]').forEach(b => b.onclick = () => removeProduct(b.dataset.removeProduct));
@@ -1132,6 +1230,7 @@ function attachTabEvents(){
   document.querySelectorAll('[data-remove-recipe]').forEach(b => b.onclick = () => removeRecipe(b.dataset.removeRecipe));
   document.querySelectorAll('[data-edit-costproduct]').forEach(b => b.onclick = () => { MODAL = { type:'newCostProduct', payload: DATA.costProducts.find(cp=>cp.id===b.dataset.editCostproduct) }; renderModal(); });
   document.querySelectorAll('[data-remove-costproduct]').forEach(b => b.onclick = () => removeCostProduct(b.dataset.removeCostproduct));
+  document.querySelectorAll('[data-edit-packaging]').forEach(b => b.onclick = () => { MODAL = { type:'newPackagingItem', payload: DATA.packagingCatalog.find(p=>p.id===b.dataset.editPackaging) }; renderModal(); });
   document.querySelectorAll('[data-remove-packaging]').forEach(b => b.onclick = () => removePackagingItem(b.dataset.removePackaging));
   document.querySelectorAll('[data-finish-wip]').forEach(b => b.onclick = () => { MODAL = { type:'finishWip', payload: (DATA.workInProgress||[]).find(w=>w.id===b.dataset.finishWip) }; renderModal(); });
   document.querySelectorAll('[data-cancel-wip]').forEach(b => b.onclick = () => cancelWip(b.dataset.cancelWip));
@@ -1155,7 +1254,7 @@ function renderModal(){
   if(MODAL.type==='loyalty') inner = loyaltyModalHtml();
   if(MODAL.type==='newIngredient') inner = ingredientModalHtml(MODAL.payload);
   if(MODAL.type==='newRecipe') inner = recipeModalHtml(MODAL.payload);
-  if(MODAL.type==='newPackagingItem') inner = packagingItemModalHtml();
+  if(MODAL.type==='newPackagingItem') inner = packagingItemModalHtml(MODAL.payload);
   if(MODAL.type==='newCostProduct') inner = costProductModalHtml(MODAL.payload);
   if(MODAL.type==='stockMovement') inner = stockMovementModalHtml();
   if(MODAL.type==='recipeStockMovement') inner = recipeStockMovementModalHtml();
@@ -1175,7 +1274,7 @@ function renderModal(){
   if(MODAL.type==='loyalty') attachLoyaltyModalEvents();
   if(MODAL.type==='newIngredient') attachIngredientModalEvents(MODAL.payload);
   if(MODAL.type==='newRecipe') attachRecipeModalEvents(MODAL.payload);
-  if(MODAL.type==='newPackagingItem') attachPackagingItemModalEvents();
+  if(MODAL.type==='newPackagingItem') attachPackagingItemModalEvents(MODAL.payload);
   if(MODAL.type==='newCostProduct') attachCostProductModalEvents(MODAL.payload);
   if(MODAL.type==='stockMovement') attachStockMovementModalEvents();
   if(MODAL.type==='recipeStockMovement') attachRecipeStockMovementModalEvents();
@@ -1478,7 +1577,16 @@ function purchaseModalHtml(prefillIngredientId){
       </div>
       <div style="flex:1" class="field"><div class="field-label">Cantidad comprada</div><input type="number" min="0" step="any" class="input" id="pu-ing-qty" placeholder="Ej: 5000"/></div>
     </div>
-    <div id="pu-desc-field" class="field" style="display:none"><div class="field-label">Descripción</div><input class="input" id="pu-desc" placeholder="Ej: Cajas individuales x50"/></div>
+    <div id="pu-packaging-fields" style="display:none;gap:10px">
+      <div style="flex:2" class="field"><div class="field-label">Packaging</div>
+        <select class="input" id="pu-packaging">
+          <option value="">Elegir packaging...</option>
+          ${DATA.packagingCatalog.map(pk=>`<option value="${pk.id}">${esc(pk.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div style="flex:1" class="field"><div class="field-label">Cantidad comprada</div><input type="number" min="0" step="any" class="input" id="pu-pkg-qty" placeholder="Ej: 50"/></div>
+    </div>
+    <div id="pu-desc-field" class="field" style="display:none"><div class="field-label">Descripción</div><input class="input" id="pu-desc" placeholder="Ej: Nafta reparto"/></div>
     <div style="display:flex;gap:10px">
       <div style="flex:1" class="field"><div class="field-label">Monto</div><input type="number" class="input" id="pu-amount"/></div>
       <div style="flex:1" class="field"><div class="field-label">Fecha</div><input type="date" class="input" id="pu-date" value="${todayISO()}"/></div>
@@ -1496,11 +1604,14 @@ function attachPurchaseModalEvents(prefillIngredientId){
   document.getElementById('modal-cancel').onclick = closeModal;
   const catEl = document.getElementById('pu-category');
   const ingFields = document.getElementById('pu-ingredient-fields');
+  const pkgFields = document.getElementById('pu-packaging-fields');
   const descField = document.getElementById('pu-desc-field');
   const syncFields = () => {
     const isIngredient = catEl.value === 'Ingredientes';
+    const isPackaging = catEl.value === 'Packaging';
     ingFields.style.display = isIngredient ? 'flex' : 'none';
-    descField.style.display = isIngredient ? 'none' : 'block';
+    pkgFields.style.display = isPackaging ? 'flex' : 'none';
+    descField.style.display = (isIngredient||isPackaging) ? 'none' : 'block';
   };
   if(prefillIngredientId) catEl.value = 'Ingredientes';
   catEl.onchange = syncFields; syncFields();
@@ -1522,6 +1633,17 @@ function attachPurchaseModalEvents(prefillIngredientId){
       const { error } = await sb.from('purchases').insert({ description, amount, date, owner_id: ownerId, category, ingredient_id: ingredientId, ingredient_qty: qty });
       if(error){ alert('Error al guardar: ' + error.message); return; }
       const { error: rpcErr } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: ingredientId, p_delta: qty });
+      if(rpcErr){ alert('Error al actualizar el stock: ' + rpcErr.message); return; }
+    } else if(category === 'Packaging'){
+      const packagingId = document.getElementById('pu-packaging').value;
+      const qty = +document.getElementById('pu-pkg-qty').value || 0;
+      if(!packagingId){ alert('Elegí un packaging.'); return; }
+      if(!qty){ alert('Poné la cantidad comprada.'); return; }
+      const pk = DATA.packagingCatalog.find(p=>p.id===packagingId);
+      const description = pk ? `${pk.name} (${qty})` : 'Packaging';
+      const { error } = await sb.from('purchases').insert({ description, amount, date, owner_id: ownerId, category, packaging_id: packagingId, packaging_qty: qty });
+      if(error){ alert('Error al guardar: ' + error.message); return; }
+      const { error: rpcErr } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: packagingId, p_delta: qty });
       if(rpcErr){ alert('Error al actualizar el stock: ' + rpcErr.message); return; }
     } else {
       const description = document.getElementById('pu-desc').value.trim();
@@ -1681,14 +1803,14 @@ async function saveRecipe(editing){
 }
 
 /* ---- Packaging (catálogo) ---- */
-function packagingItemModalHtml(){
+function packagingItemModalHtml(editing){
   return `
-    ${modalHeader('Nuevo packaging')}
-    <div class="field"><div class="field-label">Nombre</div><input class="input" id="pk-name" placeholder="Ej: Caja individual"/></div>
-    <div class="field"><div class="field-label">Costo</div><input type="number" class="input" id="pk-cost"/></div>
+    ${modalHeader(editing?'Editar packaging':'Nuevo packaging')}
+    <div class="field"><div class="field-label">Nombre</div><input class="input" id="pk-name" value="${esc(editing?.name||'')}" placeholder="Ej: Caja individual"/></div>
+    <div class="field"><div class="field-label">Costo</div><input type="number" class="input" id="pk-cost" value="${editing?.cost ?? ''}"/></div>
     <div style="display:flex;gap:10px">
-      <div style="flex:1" class="field"><div class="field-label">Stock actual (cuántos tenés)</div><input type="number" class="input" id="pk-stock" value="0"/></div>
-      <div style="flex:1" class="field"><div class="field-label">Avisar si baja de</div><input type="number" class="input" id="pk-lowstock" value="0"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Stock actual (cuántos tenés)</div><input type="number" class="input" id="pk-stock" value="${editing?.currentStock ?? 0}"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Avisar si baja de</div><input type="number" class="input" id="pk-lowstock" value="${editing?.lowStockAlert ?? 0}"/></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
@@ -1696,7 +1818,7 @@ function packagingItemModalHtml(){
     </div>
   `;
 }
-function attachPackagingItemModalEvents(){
+function attachPackagingItemModalEvents(editing){
   document.getElementById('modal-cancel').onclick = closeModal;
   document.getElementById('pk-save').onclick = async () => {
     const name = document.getElementById('pk-name').value.trim();
@@ -1704,7 +1826,10 @@ function attachPackagingItemModalEvents(){
     const currentStock = +document.getElementById('pk-stock').value || 0;
     const lowStockAlert = +document.getElementById('pk-lowstock').value || 0;
     if(!name){ alert('Poné un nombre.'); return; }
-    const { error } = await sb.from('packaging_catalog').insert({ name, cost, current_stock: currentStock, low_stock_alert: lowStockAlert });
+    const payload = { name, cost, current_stock: currentStock, low_stock_alert: lowStockAlert };
+    const { error } = editing
+      ? await sb.from('packaging_catalog').update(payload).eq('id', editing.id)
+      : await sb.from('packaging_catalog').insert(payload);
     if(error){ alert('Error al guardar: ' + error.message); return; }
     await loadAll();
     closeModal();

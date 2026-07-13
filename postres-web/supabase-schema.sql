@@ -227,6 +227,8 @@ alter table products add column if not exists cost_product_id uuid references co
 
 alter table purchases add column if not exists ingredient_id uuid references ingredients(id) on delete set null;
 alter table purchases add column if not exists ingredient_qty numeric;
+alter table purchases add column if not exists packaging_id uuid references packaging_catalog(id) on delete set null;
+alter table purchases add column if not exists packaging_qty numeric;
 
 create table if not exists shopping_list_manual (
   id uuid primary key default gen_random_uuid(),
