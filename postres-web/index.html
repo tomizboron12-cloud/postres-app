@@ -90,7 +90,8 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--frutilla);outlin
   .mobile-topbar .brand{padding:0;font-size:17px}
   .mobile-topbar .user-pill{font-size:12px;font-weight:700;color:#d8c9bb;display:flex;align-items:center;gap:8px}
   .mobile-topbar .logout-icon{background:none;border:none;color:#d8c9bb;display:flex;padding:4px}
-  .mobile-navbar{display:flex;position:fixed;top:54px;left:0;right:0;background:var(--choco);z-index:60;padding:6px 6px calc(6px + env(safe-area-inset-top,0px)) 6px;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;box-shadow:0 4px 10px rgba(43,27,20,.15)}
+  .mobile-navbar{display:flex;position:fixed;top:54px;left:0;right:0;background:var(--choco);z-index:60;padding:6px 6px calc(6px + env(safe-area-inset-top,0px)) 6px;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;box-shadow:0 4px 10px rgba(43,27,20,.15);transition:transform .25s ease}
+  .mobile-navbar.nav-hidden{transform:translateY(-100%)}
   .mobile-navbar button{flex:0 0 auto;min-width:72px;display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:none;color:#d8c9bb;font-size:11.5px;font-weight:700;padding:11px 14px;border-radius:12px;position:relative}
   .mobile-navbar button svg{width:22px;height:22px}
   .mobile-navbar button.active{background:rgba(255,255,255,.14);color:#fff}
@@ -236,11 +237,9 @@ function computeMetrics(){
   for(const pur of DATA.purchases){
     const mk = monthKey(pur.date);
     byMonth[mk] = byMonth[mk] || { revenue:0, cost:0, grossProfit:0, profit:0, grossByOwner:{}, byOwner:{} };
-    // "Ingredientes" y "Packaging" ya están reflejados en el costo por unidad de cada
-    // producto vendido (vía su receta de costeo), así que no se restan de nuevo acá.
-    // Restarlos también acá sería contarlos dos veces. Sí se restan los demás gastos
-    // (delivery, marketing, otros) porque esos no forman parte del costo por unidad.
-    if(pur.category === 'Ingredientes' || pur.category === 'Packaging') continue;
+    // Ganancia Neta = Ventas - TODOS los gastos del mes (ingredientes, packaging,
+    // delivery, marketing, todo). Es la plata real que quedó en el bolsillo,
+    // sin importar la categoría del gasto.
     byMonth[mk].profit -= pur.amount;
     byMonth[mk].byOwner[pur.ownerId] = (byMonth[mk].byOwner[pur.ownerId]||0) - pur.amount;
   }
@@ -524,7 +523,7 @@ function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margen
           <div class="row" style="font-size:13.5px"><span class="row-label">Ventas totales</span><span class="row-value num">${money(thisMonth.revenue)}</span></div>
           <div class="row" style="font-size:13.5px"><span class="row-label">Costo de productos vendidos</span><span class="row-value num">${money(thisMonth.cost)}</span></div>
           <div class="row" style="font-size:13.5px"><span class="row-label">Ganancia bruta (margen ${margenBruto}%)</span><span class="row-value num" style="color:${COLORS.menta}">${money(thisMonth.grossProfit)}</span></div>
-          <div class="row" style="font-size:13.5px"><span class="row-label">Gastos operativos (packaging aparte, delivery, etc.)</span><span class="row-value num" style="color:${COLORS.frutillaDark}">-${money(gastosOperativos)}</span></div>
+          <div class="row" style="font-size:13.5px"><span class="row-label">Gastos del mes (ingredientes, packaging, delivery, todo)</span><span class="row-value num" style="color:${COLORS.frutillaDark}">-${money(gastosOperativos)}</span></div>
           <div class="row" style="font-size:14px;border-top:1px solid var(--line);margin-top:4px;padding-top:6px"><span class="row-label" style="font-weight:700">Ganancia neta (margen ${margenNeto}%)</span><span class="row-value bold num" style="color:${COLORS.menta}">${money(thisMonth.profit)}</span></div>
         </div>
       </div>
@@ -567,8 +566,6 @@ function renderExpenseSummary(){
   const monthPurchases = DATA.purchases.filter(p => monthKey(p.date) === currentMonth);
   if(monthPurchases.length === 0) return '';
   const total = monthPurchases.reduce((a,p)=>a+p.amount, 0);
-  const totalIngredientes = monthPurchases.filter(p=>p.category==='Ingredientes'||p.category==='Packaging').reduce((a,p)=>a+p.amount,0);
-  const totalOperativos = total - totalIngredientes;
   const byCategoryOwner = {};
   for(const p of monthPurchases){
     const key = p.category + '|' + p.ownerId;
@@ -580,10 +577,10 @@ function renderExpenseSummary(){
   return `
     <div class="card" style="margin-bottom:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
-        <div class="serif" style="font-weight:700;font-size:16px">Gastos del mes</div>
+        <div class="serif" style="font-weight:700;font-size:16px">Gastos del mes (compras / stock / ingredientes)</div>
         <span class="num" style="font-weight:800;color:${COLORS.frutillaDark}">-${money(total)}</span>
       </div>
-      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">De estos, <span class="num" style="font-weight:700">${money(totalOperativos)}</span> impactan en la Ganancia Neta. Los <span class="num" style="font-weight:700">${money(totalIngredientes)}</span> de Ingredientes y Packaging no se restan de nuevo acá, porque ya están contemplados en el "Costo del mes" de cada venta.</div>
+      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">Todo este monto se resta de la Ganancia Neta del mes, sin importar la categoría.</div>
       ${rows.map(r => `
         <div class="row" style="font-size:13.5px">
           <span class="row-label">${esc(r.category)} <span style="color:${r.ownerId==='mama'?COLORS.dulce:COLORS.frutilla};font-weight:700">(${esc(ownerName(r.ownerId))})</span></span>
@@ -1294,7 +1291,6 @@ function saleModalHtml(){
   return renderSaleModalBody();
 }
 function renderSaleModalBody(){
-  const clientDatalist = DATA.clients.map(c=>`<option value="${esc(c.name)}"></option>`).join('');
   const computed = SALE_ITEMS.map(it => { const p = DATA.products.find(p=>p.id===it.productId); return {...it, product:p, price:p?p.price:0, cost:p?p.cost:0}; });
   const revenue = computed.reduce((a,it)=>a+it.price*it.qty,0);
   const cost = computed.reduce((a,it)=>a+it.cost*it.qty,0);
@@ -1305,9 +1301,10 @@ function renderSaleModalBody(){
 
   return `
     ${modalHeader('Nueva venta')}
-    <div class="field"><div class="field-label">Cliente (opcional — escribí el nombre, si es nuevo se crea solo)</div>
-      <input class="input" id="sale-client" list="clients-datalist" placeholder="Ej: Ana Pérez, o dejar vacío"/>
-      <datalist id="clients-datalist">${clientDatalist}</datalist>
+    <div class="field" style="position:relative">
+      <div class="field-label">Cliente (opcional — elegí uno o escribí un nombre nuevo)</div>
+      <input class="input" id="sale-client" autocomplete="off" placeholder="Ej: Ana Pérez, o dejar vacío"/>
+      <div id="sale-client-suggestions" style="display:none;position:absolute;left:0;right:0;top:100%;margin-top:2px;background:#fff;border:1px solid var(--line);border-radius:10px;max-height:180px;overflow-y:auto;z-index:20;box-shadow:0 6px 18px rgba(43,27,20,0.12)"></div>
     </div>
     <div style="display:flex;gap:10px">
       <div style="flex:1" class="field"><div class="field-label">Fecha</div><input type="date" class="input" id="sale-date" value="${todayISO()}"/></div>
@@ -1359,6 +1356,24 @@ function attachSaleModalEvents(){
   document.getElementById('sale-save').onclick = saveSale;
   const discEl = document.getElementById('sale-discount');
   if(discEl) discEl.onchange = () => { SALE_DISCOUNT = +discEl.value || 0; refreshSaleModal(); };
+
+  const clientInput = document.getElementById('sale-client');
+  const suggBox = document.getElementById('sale-client-suggestions');
+  if(clientInput && suggBox){
+    const showSuggestions = () => {
+      const q = clientInput.value.trim().toLowerCase();
+      const matches = DATA.clients.filter(c => !q || c.name.toLowerCase().includes(q)).slice(0,8);
+      if(matches.length===0){ suggBox.style.display = 'none'; return; }
+      suggBox.innerHTML = matches.map(c => `<div class="client-suggestion-item" data-client-name="${esc(c.name)}" style="padding:10px 12px;font-size:14px;cursor:pointer;border-bottom:1px solid var(--line)">${esc(c.name)}</div>`).join('');
+      suggBox.style.display = 'block';
+      suggBox.querySelectorAll('.client-suggestion-item').forEach(el => {
+        el.onmousedown = (e) => { e.preventDefault(); clientInput.value = el.dataset.clientName; suggBox.style.display = 'none'; };
+      });
+    };
+    clientInput.oninput = showSuggestions;
+    clientInput.onfocus = showSuggestions;
+    clientInput.onblur = () => { setTimeout(() => { suggBox.style.display = 'none'; }, 120); };
+  }
 }
 function refreshSaleModal(){
   const client = document.getElementById('sale-client')?.value || '';
@@ -2255,6 +2270,17 @@ function attachShoppingEvents(){
     renderModal();
   });
 }
+
+/* ===================== SCROLL: ocultar/mostrar menú mobile ===================== */
+let lastScrollY = 0;
+window.addEventListener('scroll', () => {
+  const navbar = document.querySelector('.mobile-navbar');
+  if(!navbar || window.innerWidth > 760) return;
+  const y = window.scrollY;
+  if(y > lastScrollY && y > 60){ navbar.classList.add('nav-hidden'); }
+  else { navbar.classList.remove('nav-hidden'); }
+  lastScrollY = y;
+}, { passive: true });
 
 /* ===================== INIT ===================== */
 init();
