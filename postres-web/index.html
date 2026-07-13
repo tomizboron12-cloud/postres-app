@@ -142,7 +142,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 const CURRENT_USER_KEY = 'postres-current-user';
 
 /* ===================== ESTADO GLOBAL ===================== */
-let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[], shoppingListManual:[] };
+let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[], shoppingListManual:[], workInProgress:[] };
 let TAB = 'dashboard';
 let MODAL = null;
 let SEARCH_Q = '';
@@ -151,11 +151,12 @@ let SAVING = false;
 
 function ownerName(id){ return (DATA.owners.find(o=>o.id===id)||{}).name || id; }
 function clientMap(){ return Object.fromEntries(DATA.clients.map(c=>[c.id,c])); }
+function productMap(){ return Object.fromEntries(DATA.products.map(p=>[p.id,p])); }
 function currentUser(){ return localStorage.getItem(CURRENT_USER_KEY); }
 
 /* ===================== CARGA DE DATOS (SUPABASE) ===================== */
 async function loadAll(){
-  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR, shoppingR] = await Promise.all([
+  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR, shoppingR, wipR] = await Promise.all([
     sb.from('owners').select('*').order('id'),
     sb.from('products').select('*').order('created_at'),
     sb.from('clients').select('*').order('name'),
@@ -167,6 +168,7 @@ async function loadAll(){
     sb.from('packaging_catalog').select('*').order('name'),
     sb.from('cost_products').select('*, cost_product_ingredients(*), cost_product_recipes(*), cost_product_packaging(*)').order('name'),
     sb.from('shopping_list_manual').select('*').order('created_at'),
+    sb.from('work_in_progress').select('*').order('created_at'),
   ]);
   if(ownersR.data) DATA.owners = ownersR.data.map(o=>({id:o.id, name:o.name}));
   if(productsR.data) DATA.products = productsR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, price:+p.price, ownerId:p.owner_id, trackStock:p.track_stock, stock:p.stock, lowStockAlert:p.low_stock_alert, costProductId:p.cost_product_id}));
@@ -179,10 +181,10 @@ async function loadAll(){
   if(loyaltyR.data) DATA.loyalty = {threshold:loyaltyR.data.threshold, reward:loyaltyR.data.reward};
   if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, packageQty:+i.package_qty, unit:i.unit, currentStock:+i.current_stock||0, lowStockAlert:+i.low_stock_alert||0}));
   if(recipesR.data) DATA.recipes = recipesR.data.map(r=>({
-    id:r.id, name:r.name, yieldQty:+r.yield_qty, yieldUnit:r.yield_unit,
+    id:r.id, name:r.name, yieldQty:+r.yield_qty, yieldUnit:r.yield_unit, currentStock:+r.current_stock||0, lowStockAlert:+r.low_stock_alert||0,
     items:(r.recipe_items||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty}))
   }));
-  if(packagingR.data) DATA.packagingCatalog = packagingR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost}));
+  if(packagingR.data) DATA.packagingCatalog = packagingR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, currentStock:+p.current_stock||0, lowStockAlert:+p.low_stock_alert||0}));
   if(costProductsR.data) DATA.costProducts = costProductsR.data.map(cp=>({
     id:cp.id, name:cp.name,
     directIngredients:(cp.cost_product_ingredients||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty})),
@@ -190,6 +192,7 @@ async function loadAll(){
     packagingIds:(cp.cost_product_packaging||[]).map(it=>it.packaging_id),
   }));
   if(shoppingR.data) DATA.shoppingListManual = shoppingR.data.map(i=>({id:i.id, name:i.name, checked:i.checked}));
+  if(wipR.data) DATA.workInProgress = wipR.data.map(w=>({id:w.id, productId:w.product_id, qty:+w.qty, date:w.date, usedIngredientIds:w.used_ingredient_ids||[], usedRecipeIds:w.used_recipe_ids||[]}));
   LOADED = true;
 }
 
@@ -202,7 +205,7 @@ function subscribeRealtime(){
   const channel = sb.channel('postres-sync');
   ['products','clients','sales','sale_items','purchases','loyalty_config','owners',
    'ingredients','recipes','recipe_items','packaging_catalog','cost_products','cost_product_ingredients','cost_product_recipes','cost_product_packaging',
-   'shopping_list_manual'].forEach(table => {
+   'shopping_list_manual','work_in_progress'].forEach(table => {
     channel.on('postgres_changes', {event:'*', schema:'public', table}, scheduleReload);
   });
   channel.subscribe();
@@ -231,6 +234,11 @@ function computeMetrics(){
   for(const pur of DATA.purchases){
     const mk = monthKey(pur.date);
     byMonth[mk] = byMonth[mk] || { revenue:0, cost:0, grossProfit:0, profit:0, grossByOwner:{}, byOwner:{} };
+    // Las compras de "Ingredientes" NO se restan de la ganancia acá: ese costo ya está
+    // reflejado en el "Costo del mes" a través del costo por unidad de cada producto vendido.
+    // Restarlo también acá sería contarlo dos veces. Sí se restan los demás gastos
+    // (packaging, delivery, marketing, otros) porque esos no forman parte del costo por unidad.
+    if(pur.category === 'Ingredientes') continue;
     byMonth[mk].profit -= pur.amount;
     byMonth[mk].byOwner[pur.ownerId] = (byMonth[mk].byOwner[pur.ownerId]||0) - pur.amount;
   }
@@ -277,18 +285,26 @@ function costProductBreakdown(cp){
 const UNIT_LABEL = { g:'g', ml:'ml', unidades:'unidades' };
 
 function ingredientConsumptionForCostProduct(cp, multiplier){
-  const rMap = recipeMap();
+  // Solo ingredientes DIRECTOS (los que no pasan por una receta) se descuentan como ingrediente crudo.
   const consumption = {}; // ingredientId -> qty consumida
   for(const it of (cp.directIngredients||[])){
     consumption[it.ingredientId] = (consumption[it.ingredientId]||0) + it.qty * multiplier;
   }
+  return consumption;
+}
+function recipeConsumptionForCostProduct(cp, multiplier){
+  // Las recetas usadas (mermelada, crema, etc.) se descuentan de SU PROPIO stock preparado.
+  const consumption = {}; // recipeId -> qty consumida
   for(const it of (cp.recipesUsed||[])){
-    const r = rMap[it.recipeId];
-    if(!r || !r.yieldQty) continue;
-    for(const ri of (r.items||[])){
-      const perUnit = ri.qty / r.yieldQty;
-      consumption[ri.ingredientId] = (consumption[ri.ingredientId]||0) + perUnit * it.qty * multiplier;
-    }
+    consumption[it.recipeId] = (consumption[it.recipeId]||0) + it.qty * multiplier;
+  }
+  return consumption;
+}
+function packagingConsumptionForCostProduct(cp, multiplier){
+  // Un pote/caja de cada packaging vinculado por cada unidad producida.
+  const consumption = {};
+  for(const pid of (cp.packagingIds||[])){
+    consumption[pid] = (consumption[pid]||0) + multiplier;
   }
   return consumption;
 }
@@ -473,6 +489,8 @@ function renderExpenseSummary(){
   const monthPurchases = DATA.purchases.filter(p => monthKey(p.date) === currentMonth);
   if(monthPurchases.length === 0) return '';
   const total = monthPurchases.reduce((a,p)=>a+p.amount, 0);
+  const totalIngredientes = monthPurchases.filter(p=>p.category==='Ingredientes').reduce((a,p)=>a+p.amount,0);
+  const totalOperativos = total - totalIngredientes;
   const byCategoryOwner = {};
   for(const p of monthPurchases){
     const key = p.category + '|' + p.ownerId;
@@ -483,10 +501,11 @@ function renderExpenseSummary(){
 
   return `
     <div class="card" style="margin-bottom:18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
         <div class="serif" style="font-weight:700;font-size:16px">Gastos del mes</div>
         <span class="num" style="font-weight:800;color:${COLORS.frutillaDark}">-${money(total)}</span>
       </div>
+      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">De estos, <span class="num" style="font-weight:700">${money(totalOperativos)}</span> impactan en la Ganancia Neta. Los <span class="num" style="font-weight:700">${money(totalIngredientes)}</span> de Ingredientes no se restan de nuevo acá, porque ya están contemplados en el "Costo del mes" de cada venta.</div>
       ${rows.map(r => `
         <div class="row" style="font-size:13.5px">
           <span class="row-label">${esc(r.category)} <span style="color:${r.ownerId==='mama'?COLORS.dulce:COLORS.frutilla};font-weight:700">(${esc(ownerName(r.ownerId))})</span></span>
@@ -621,7 +640,142 @@ function renderProducts(){
         `;
       }).join('')}
     </div>
+
+    ${renderWipSection()}
   `;
+}
+
+function renderWipSection(){
+  const wip = DATA.workInProgress || [];
+  if(wip.length===0) return '';
+  const pMap = productMap();
+  return `
+    <div class="card" style="margin-top:18px">
+      <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:10px">En preparación (incompletos)</div>
+      <div class="stack">
+        ${wip.map(w => {
+          const p = pMap[w.productId];
+          return `
+            <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
+              <span class="row-label">${esc(p?p.name:'(postre eliminado)')} <span class="num" style="color:var(--chocoSoft)">× ${w.qty} — desde ${w.date}</span></span>
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-ghost" data-finish-wip="${w.id}" style="padding:5px 10px;font-size:12.5px">Terminar</button>
+                <button class="btn-icon" data-cancel-wip="${w.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+async function cancelWip(id){
+  if(!confirm('¿Cancelar esta producción incompleta? Se va a restituir lo que ya se había descontado.')) return;
+  const w = (DATA.workInProgress||[]).find(w=>w.id===id);
+  if(!w) return;
+  const p = DATA.products.find(p=>p.id===w.productId);
+  const cp = p ? DATA.costProducts.find(cp=>cp.id===p.costProductId) : null;
+  try{
+    if(cp){
+      await Promise.all((cp.directIngredients||[]).filter(it=>w.usedIngredientIds.includes(it.ingredientId)).map(it =>
+        sb.rpc('adjust_ingredient_stock', { p_ingredient_id: it.ingredientId, p_delta: it.qty*w.qty })
+      ));
+      await Promise.all((cp.recipesUsed||[]).filter(it=>w.usedRecipeIds.includes(it.recipeId)).map(it =>
+        sb.rpc('adjust_recipe_stock', { p_recipe_id: it.recipeId, p_delta: it.qty*w.qty })
+      ));
+    }
+    const { error } = await sb.from('work_in_progress').delete().eq('id', id);
+    if(error) throw error;
+    await loadAll();
+    render();
+  } catch(e){
+    alert('Error al cancelar: ' + e.message);
+  }
+}
+
+function finishWipModalHtml(w){
+  const p = DATA.products.find(p=>p.id===w.productId);
+  const cp = p ? DATA.costProducts.find(cp=>cp.id===p.costProductId) : null;
+  if(!cp){
+    return `${modalHeader('Terminar producción')}<div class="empty">No se encontró la receta de costeo vinculada.</div><div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn btn-ghost" id="modal-cancel">Cerrar</button></div>`;
+  }
+  const rMap = recipeMap(), iMap = ingredientMap();
+  const pendingRecipes = (cp.recipesUsed||[]).filter(it => !w.usedRecipeIds.includes(it.recipeId));
+  const pendingIngredients = (cp.directIngredients||[]).filter(it => !w.usedIngredientIds.includes(it.ingredientId));
+  const pkgConsumption = packagingConsumptionForCostProduct(cp, w.qty);
+
+  const recLines = pendingRecipes.map(it => {
+    const r = rMap[it.recipeId]; if(!r) return '';
+    const amt = it.qty*w.qty;
+    const after = (r.currentStock||0) - amt;
+    return `<div class="row" style="font-size:12.5px"><span class="row-label">Receta pendiente: ${esc(r.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
+  }).join('');
+  const ingLines = pendingIngredients.map(it => {
+    const ing = iMap[it.ingredientId]; if(!ing) return '';
+    const amt = it.qty*w.qty;
+    const after = (ing.currentStock||0) - amt;
+    return `<div class="row" style="font-size:12.5px"><span class="row-label">Ingrediente pendiente: ${esc(ing.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza!':'quedan '+after.toFixed(1)}</span></div>`;
+  }).join('');
+  const pkgLines = Object.entries(pkgConsumption).map(([pid, amt]) => {
+    const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return '';
+    const after = (pk.currentStock||0) - amt;
+    return `<div class="row" style="font-size:12.5px"><span class="row-label">Packaging: ${esc(pk.name)} (-${amt})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">quedan ${after}</span></div>`;
+  }).join('');
+
+  return `
+    ${modalHeader('Terminar: ' + (p?p.name:''))}
+    <div style="font-size:13.5px;color:var(--chocoSoft);margin-bottom:10px">Cantidad: ${w.qty}. Al confirmar, se descuenta lo que faltaba y se suma al stock de venta.</div>
+    ${recLines || ingLines || pkgLines ? `<div class="field-label" style="margin-bottom:4px">Falta descontar:</div>${recLines}${ingLines}${pkgLines}` : `<div class="empty" style="padding:8px 0">No queda nada pendiente, solo falta sumar el packaging y el stock final.</div>`}
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="wip-finish-save">Confirmar y sumar stock</button>
+    </div>
+  `;
+}
+function attachFinishWipModalEvents(w){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  const btn = document.getElementById('wip-finish-save');
+  if(!btn) return;
+  btn.onclick = async () => {
+    const p = DATA.products.find(p=>p.id===w.productId);
+    const cp = p ? DATA.costProducts.find(cp=>cp.id===p.costProductId) : null;
+    try{
+      let warnings = [];
+      if(cp){
+        await Promise.all((cp.directIngredients||[]).filter(it=>!w.usedIngredientIds.includes(it.ingredientId)).map(async it => {
+          const ing = DATA.ingredients.find(i=>i.id===it.ingredientId); if(!ing) return;
+          const { data: newStock, error } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: it.ingredientId, p_delta: -(it.qty*w.qty) });
+          if(error) throw error;
+          if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
+        }));
+        await Promise.all((cp.recipesUsed||[]).filter(it=>!w.usedRecipeIds.includes(it.recipeId)).map(async it => {
+          const r = DATA.recipes.find(r=>r.id===it.recipeId); if(!r) return;
+          const { data: newStock, error } = await sb.rpc('adjust_recipe_stock', { p_recipe_id: it.recipeId, p_delta: -(it.qty*w.qty) });
+          if(error) throw error;
+          if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
+        }));
+        const pkgConsumption = packagingConsumptionForCostProduct(cp, w.qty);
+        await Promise.all(Object.entries(pkgConsumption).map(async ([pid, amt]) => {
+          const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return;
+          const { data: newStock, error } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: pid, p_delta: -amt });
+          if(error) throw error;
+          if(pk.lowStockAlert>0 && newStock<=pk.lowStockAlert) warnings.push(pk.name);
+        }));
+      }
+      if(p){
+        const { error } = await sb.rpc('adjust_stock', { p_product_id: w.productId, p_delta: w.qty });
+        if(error) throw error;
+      }
+      const { error: delErr } = await sb.from('work_in_progress').delete().eq('id', w.id);
+      if(delErr) throw delErr;
+      await loadAll();
+      closeModal();
+      if(warnings.length) alert(`⚠ Ojo, quedaste con poco stock de: ${warnings.join(', ')}.`);
+    } catch(e){
+      alert('Error al terminar la producción: ' + e.message);
+    }
+  };
 }
 
 async function removeProduct(id){
@@ -782,7 +936,10 @@ function renderRecipes(){
   return `
     <div class="header-row">
       <div><div class="header-title serif">Recetas</div><div class="header-sub">Preparaciones como mermelada, cremas, bases — se arman con ingredientes de la base</div></div>
-      <button class="btn btn-primary" data-open-modal="newRecipe" ${DATA.ingredients.length===0?'disabled title="Cargá ingredientes primero"':''}>${ICONS.plus} Nueva receta</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost" data-open-modal="recipeStockMovement" ${DATA.recipes.length===0?'disabled':''}>${ICONS.package} Cargar stock de receta</button>
+        <button class="btn btn-primary" data-open-modal="newRecipe" ${DATA.ingredients.length===0?'disabled title="Cargá ingredientes primero"':''}>${ICONS.plus} Nueva receta</button>
+      </div>
     </div>
     ${DATA.ingredients.length===0 ? `<div class="card"><div class="empty">Primero cargá algunos ingredientes en la sección Ingredientes.</div></div>` : ''}
     ${DATA.recipes.length===0 ? `<div class="card"><div class="empty">Todavía no cargaste recetas.</div></div>` : `
@@ -790,10 +947,11 @@ function renderRecipes(){
         ${DATA.recipes.map(r => {
           const total = recipeCostTotal(r);
           const perUnit = recipeCostPerUnit(r);
+          const low = r.lowStockAlert>0 && (r.currentStock||0)<=r.lowStockAlert;
           return `
-            <div class="card">
+            <div class="card" style="${low?`border-color:${COLORS.frutilla}`:''}">
               <div style="display:flex;justify-content:space-between;align-items:flex-start">
-                <div style="font-weight:700;font-size:16px">${esc(r.name)}</div>
+                <div style="font-weight:700;font-size:16px">${esc(r.name)} ${low?`<span class="pill" style="background:${COLORS.frutilla}1c;color:${COLORS.frutillaDark}">Stock bajo</span>`:''}</div>
                 <div style="display:flex;gap:4px">
                   <button class="btn-icon" data-edit-recipe="${r.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
                   <button class="btn-icon" data-remove-recipe="${r.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
@@ -801,8 +959,9 @@ function renderRecipes(){
               </div>
               <div style="font-size:12.5px;color:var(--chocoSoft);margin-top:4px">${(r.items||[]).length} ingrediente(s) · rinde ${r.yieldQty} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit}</div>
               <div class="num" style="margin-top:10px;font-size:13.5px">
-                <div class="row"><span class="row-label">Costo total</span><span class="row-value bold">${money(total)}</span></div>
+                <div class="row"><span class="row-label">Costo total (del lote)</span><span class="row-value bold">${money(total)}</span></div>
                 <div class="row"><span class="row-label">Costo por ${r.yieldUnit==='porciones'?'porción':(UNIT_LABEL[r.yieldUnit]||r.yieldUnit)}</span><span class="row-value" style="color:${COLORS.menta}">${money(perUnit)}</span></div>
+                <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock preparado</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${(r.currentStock||0).toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit}</span></div>
               </div>
             </div>
           `;
@@ -810,6 +969,70 @@ function renderRecipes(){
       </div>
     `}
   `;
+}
+/* ---- Producir un lote de receta (descuenta ingredientes, suma stock de la receta) ---- */
+function recipeStockMovementModalHtml(){
+  const options = DATA.recipes.map(r=>`<option value="${r.id}">${esc(r.name)} (rinde ${r.yieldQty} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit})</option>`).join('');
+  return `
+    ${modalHeader('Cargar stock de receta')}
+    <div class="field"><div class="field-label">Receta</div>
+      <select class="input" id="rsm-recipe"><option value="">Elegir receta...</option>${options}</select>
+    </div>
+    <div class="field"><div class="field-label">Cuántos lotes hizo</div><input type="number" min="1" step="any" class="input" id="rsm-batches" value="1"/></div>
+    <div id="rsm-preview" style="font-size:13px;color:var(--chocoSoft)"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="rsm-save">Guardar</button>
+    </div>
+  `;
+}
+function attachRecipeStockMovementModalEvents(){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  const updatePreview = () => {
+    const recipeId = document.getElementById('rsm-recipe').value;
+    const batches = +document.getElementById('rsm-batches').value || 0;
+    const preview = document.getElementById('rsm-preview');
+    const r = DATA.recipes.find(r=>r.id===recipeId);
+    if(!r || !batches){ preview.innerHTML = ''; return; }
+    const iMap = ingredientMap();
+    const lines = (r.items||[]).map(it => {
+      const ing = iMap[it.ingredientId];
+      if(!ing) return '';
+      const amt = it.qty * batches;
+      const after = (ing.currentStock||0) - amt;
+      const warn = after < 0;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">${esc(ing.name)} (se descuentan ${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${warn?COLORS.frutillaDark:'inherit'}">quedan ${after.toFixed(1)}</span></div>`;
+    }).join('');
+    const producedQty = (r.yieldQty||0) * batches;
+    preview.innerHTML = `<div class="field-label" style="margin:8px 0 4px">Va a sumar ${producedQty} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit} de stock de "${esc(r.name)}", descontando:</div>${lines}`;
+  };
+  document.getElementById('rsm-recipe').onchange = updatePreview;
+  document.getElementById('rsm-batches').oninput = updatePreview;
+  document.getElementById('rsm-save').onclick = async () => {
+    const recipeId = document.getElementById('rsm-recipe').value;
+    const batches = +document.getElementById('rsm-batches').value || 0;
+    if(!recipeId){ alert('Elegí una receta.'); return; }
+    if(!batches || batches<=0){ alert('Poné una cantidad válida de lotes.'); return; }
+    const r = DATA.recipes.find(r=>r.id===recipeId);
+    if(!r) return;
+    try{
+      let warnings = [];
+      await Promise.all((r.items||[]).map(async it => {
+        const ing = DATA.ingredients.find(i=>i.id===it.ingredientId);
+        if(!ing) return;
+        const { data: newStock, error } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: it.ingredientId, p_delta: -(it.qty*batches) });
+        if(error) throw error;
+        if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
+      }));
+      const { error: recErr } = await sb.rpc('adjust_recipe_stock', { p_recipe_id: recipeId, p_delta: (r.yieldQty||0)*batches });
+      if(recErr) throw recErr;
+      await loadAll();
+      closeModal();
+      if(warnings.length) alert(`⚠ Ojo, quedaste con poco stock de: ${warnings.join(', ')}.`);
+    } catch(e){
+      alert('Error al guardar: ' + e.message);
+    }
+  };
 }
 async function removeRecipe(id){
   const usedInProducts = DATA.costProducts.filter(cp => (cp.recipesUsed||[]).some(it=>it.recipeId===id));
@@ -834,15 +1057,17 @@ function renderCosting(){
         <button class="btn btn-ghost" data-open-modal="newPackagingItem">${ICONS.plus} Nuevo packaging</button>
       </div>
       ${DATA.packagingCatalog.length===0 ? `<div class="empty" style="padding:8px 0">Todavía no cargaste ítems de packaging.</div>` :
-        DATA.packagingCatalog.map(p => `
+        DATA.packagingCatalog.map(p => {
+          const low = p.lowStockAlert>0 && (p.currentStock||0)<=p.lowStockAlert;
+          return `
           <div class="row" style="font-size:13.5px">
-            <span class="row-label">${esc(p.name)}</span>
+            <span class="row-label">${esc(p.name)} ${low?`<span class="pill" style="background:${COLORS.frutilla}1c;color:${COLORS.frutillaDark}">Stock bajo</span>`:''} <span class="num" style="color:var(--chocoSoft)">— stock: ${p.currentStock||0}</span></span>
             <span style="display:flex;align-items:center;gap:10px">
               <span class="row-value num">${money(p.cost)}</span>
               <button class="btn-icon" data-remove-packaging="${p.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
             </span>
           </div>
-        `).join('')
+        `;}).join('')
       }
     </div>
 
@@ -908,6 +1133,8 @@ function attachTabEvents(){
   document.querySelectorAll('[data-edit-costproduct]').forEach(b => b.onclick = () => { MODAL = { type:'newCostProduct', payload: DATA.costProducts.find(cp=>cp.id===b.dataset.editCostproduct) }; renderModal(); });
   document.querySelectorAll('[data-remove-costproduct]').forEach(b => b.onclick = () => removeCostProduct(b.dataset.removeCostproduct));
   document.querySelectorAll('[data-remove-packaging]').forEach(b => b.onclick = () => removePackagingItem(b.dataset.removePackaging));
+  document.querySelectorAll('[data-finish-wip]').forEach(b => b.onclick = () => { MODAL = { type:'finishWip', payload: (DATA.workInProgress||[]).find(w=>w.id===b.dataset.finishWip) }; renderModal(); });
+  document.querySelectorAll('[data-cancel-wip]').forEach(b => b.onclick = () => cancelWip(b.dataset.cancelWip));
   const searchEl = document.getElementById('sale-search');
   if(searchEl){ searchEl.oninput = () => { SEARCH_Q = searchEl.value; const main = document.getElementById('main'); main.innerHTML = renderSales(); attachTabEvents(); searchEl.focus(); const v=searchEl.value; searchEl.value=''; searchEl.value=v; }; }
 }
@@ -931,6 +1158,8 @@ function renderModal(){
   if(MODAL.type==='newPackagingItem') inner = packagingItemModalHtml();
   if(MODAL.type==='newCostProduct') inner = costProductModalHtml(MODAL.payload);
   if(MODAL.type==='stockMovement') inner = stockMovementModalHtml();
+  if(MODAL.type==='recipeStockMovement') inner = recipeStockMovementModalHtml();
+  if(MODAL.type==='finishWip') inner = finishWipModalHtml(MODAL.payload);
 
   const wide = MODAL.type==='newRecipe' || MODAL.type==='newCostProduct';
   host.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-box" style="${wide?'width:560px':''}">${inner}</div></div>`;
@@ -949,6 +1178,8 @@ function renderModal(){
   if(MODAL.type==='newPackagingItem') attachPackagingItemModalEvents();
   if(MODAL.type==='newCostProduct') attachCostProductModalEvents(MODAL.payload);
   if(MODAL.type==='stockMovement') attachStockMovementModalEvents();
+  if(MODAL.type==='recipeStockMovement') attachRecipeStockMovementModalEvents();
+  if(MODAL.type==='finishWip') attachFinishWipModalEvents(MODAL.payload);
 }
 
 function modalHeader(title){
@@ -1388,6 +1619,7 @@ function renderRecipeModalBody(editing){
         </select>
       </div>
     </div>
+    <div class="field"><div class="field-label">Avisar si el stock preparado baja de</div><input type="number" class="input" id="rec-lowstock" value="${editing?.lowStockAlert ?? 0}"/></div>
     <div class="card" style="background:var(--cream);border:none">
       <div class="num row" style="font-size:16px;font-weight:800;color:${COLORS.menta}"><span>Costo total de la receta</span><span>${money(total)}</span></div>
     </div>
@@ -1420,6 +1652,7 @@ async function saveRecipe(editing){
   const name = document.getElementById('rec-name').value.trim();
   const yieldQty = +document.getElementById('rec-yield').value || 0;
   const yieldUnit = document.getElementById('rec-yield-unit').value;
+  const lowStockAlert = +document.getElementById('rec-lowstock').value || 0;
   const items = RECIPE_ITEMS.filter(it => it.ingredientId && it.qty>0);
   if(!name){ alert('Poné un nombre.'); return; }
   if(!items.length){ alert('Agregá al menos un ingrediente.'); return; }
@@ -1427,13 +1660,13 @@ async function saveRecipe(editing){
   try{
     let recipeId;
     if(editing){
-      const { error } = await sb.from('recipes').update({ name, yield_qty: yieldQty, yield_unit: yieldUnit }).eq('id', editing.id);
+      const { error } = await sb.from('recipes').update({ name, yield_qty: yieldQty, yield_unit: yieldUnit, low_stock_alert: lowStockAlert }).eq('id', editing.id);
       if(error) throw error;
       recipeId = editing.id;
       const { error: delErr } = await sb.from('recipe_items').delete().eq('recipe_id', recipeId);
       if(delErr) throw delErr;
     } else {
-      const { data, error } = await sb.from('recipes').insert({ name, yield_qty: yieldQty, yield_unit: yieldUnit }).select().single();
+      const { data, error } = await sb.from('recipes').insert({ name, yield_qty: yieldQty, yield_unit: yieldUnit, low_stock_alert: lowStockAlert }).select().single();
       if(error) throw error;
       recipeId = data.id;
     }
@@ -1453,6 +1686,10 @@ function packagingItemModalHtml(){
     ${modalHeader('Nuevo packaging')}
     <div class="field"><div class="field-label">Nombre</div><input class="input" id="pk-name" placeholder="Ej: Caja individual"/></div>
     <div class="field"><div class="field-label">Costo</div><input type="number" class="input" id="pk-cost"/></div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Stock actual (cuántos tenés)</div><input type="number" class="input" id="pk-stock" value="0"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Avisar si baja de</div><input type="number" class="input" id="pk-lowstock" value="0"/></div>
+    </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
       <button class="btn btn-primary" id="pk-save">Guardar</button>
@@ -1464,8 +1701,10 @@ function attachPackagingItemModalEvents(){
   document.getElementById('pk-save').onclick = async () => {
     const name = document.getElementById('pk-name').value.trim();
     const cost = +document.getElementById('pk-cost').value || 0;
+    const currentStock = +document.getElementById('pk-stock').value || 0;
+    const lowStockAlert = +document.getElementById('pk-lowstock').value || 0;
     if(!name){ alert('Poné un nombre.'); return; }
-    const { error } = await sb.from('packaging_catalog').insert({ name, cost });
+    const { error } = await sb.from('packaging_catalog').insert({ name, cost, current_stock: currentStock, low_stock_alert: lowStockAlert });
     if(error){ alert('Error al guardar: ' + error.message); return; }
     await loadAll();
     closeModal();
@@ -1620,11 +1859,13 @@ function stockMovementModalHtml(){
     </div>
     <div class="field"><div class="field-label">Tipo de movimiento</div>
       <select class="input" id="sm-type">
-        <option value="produccion">Hizo postres nuevos (suma stock)</option>
+        <option value="produccion">Hizo postres nuevos y terminados (suma stock)</option>
+        <option value="incompleto">Empezó a hacerlos pero quedaron incompletos (no suma stock todavía)</option>
         <option value="merma">Se comió / rompió / merma (resta stock, sin afectar ingredientes)</option>
       </select>
     </div>
     <div class="field"><div class="field-label">Cantidad</div><input type="number" min="1" class="input" id="sm-qty" value="1"/></div>
+    <div id="sm-components"></div>
     <div id="sm-preview" style="font-size:13px;color:var(--chocoSoft)"></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
       <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
@@ -1634,29 +1875,85 @@ function stockMovementModalHtml(){
 }
 function attachStockMovementModalEvents(){
   document.getElementById('modal-cancel').onclick = closeModal;
+
+  const getCostProduct = () => {
+    const p = DATA.products.find(p=>p.id===document.getElementById('sm-product').value);
+    if(!p || !p.costProductId) return null;
+    return DATA.costProducts.find(cp=>cp.id===p.costProductId) || null;
+  };
+
+  const renderComponentsChecklist = () => {
+    const type = document.getElementById('sm-type').value;
+    const box = document.getElementById('sm-components');
+    if(type !== 'incompleto'){ box.innerHTML = ''; return; }
+    const cp = getCostProduct();
+    if(!cp){ box.innerHTML = `<div class="empty" style="padding:8px 0">Este postre no está vinculado a una receta de costeo, así que no hay componentes para marcar. Elegí "producción" normal.</div>`; return; }
+    const rMap = recipeMap(), iMap = ingredientMap();
+    const recRows = (cp.recipesUsed||[]).map(it => {
+      const r = rMap[it.recipeId]; if(!r) return '';
+      return `<label style="display:flex;align-items:center;gap:8px;font-size:13.5px;padding:4px 0"><input type="checkbox" class="sm-comp-recipe" value="${it.recipeId}"/> Ya usó: ${esc(r.name)}</label>`;
+    }).join('');
+    const dirRows = (cp.directIngredients||[]).map(it => {
+      const ing = iMap[it.ingredientId]; if(!ing) return '';
+      return `<label style="display:flex;align-items:center;gap:8px;font-size:13.5px;padding:4px 0"><input type="checkbox" class="sm-comp-ing" value="${it.ingredientId}"/> Ya usó: ${esc(ing.name)}</label>`;
+    }).join('');
+    box.innerHTML = `
+      <div class="field-label" style="margin:10px 0 4px">Marcá lo que YA usó en este lote incompleto (lo que falta lo cargás después con "Terminar")</div>
+      ${recRows}${dirRows}
+      ${(!recRows && !dirRows) ? `<div class="empty" style="padding:8px 0">Esta receta de costeo no tiene ingredientes ni recetas cargadas.</div>` : ''}
+    `;
+    box.querySelectorAll('input').forEach(el => el.onchange = updatePreview);
+  };
+
   const updatePreview = () => {
     const productId = document.getElementById('sm-product').value;
     const type = document.getElementById('sm-type').value;
     const qty = +document.getElementById('sm-qty').value || 0;
     const preview = document.getElementById('sm-preview');
     const p = DATA.products.find(p=>p.id===productId);
-    if(!p || type!=='produccion' || !p.costProductId){ preview.innerHTML = ''; return; }
+    if(!p || type==='merma' || !p.costProductId){ preview.innerHTML = ''; return; }
     const cp = DATA.costProducts.find(cp=>cp.id===p.costProductId);
     if(!cp){ preview.innerHTML = ''; return; }
-    const consumption = ingredientConsumptionForCostProduct(cp, qty);
     const iMap = ingredientMap();
-    const lines = Object.entries(consumption).map(([ingId, amt]) => {
-      const ing = iMap[ingId];
-      if(!ing) return '';
+
+    let ingConsumption, recConsumption, pkgConsumption = {};
+    if(type==='incompleto'){
+      const checkedRecipeIds = Array.from(document.querySelectorAll('.sm-comp-recipe:checked')).map(c=>c.value);
+      const checkedIngIds = Array.from(document.querySelectorAll('.sm-comp-ing:checked')).map(c=>c.value);
+      ingConsumption = {};
+      for(const it of (cp.directIngredients||[])){ if(checkedIngIds.includes(it.ingredientId)) ingConsumption[it.ingredientId] = (ingConsumption[it.ingredientId]||0) + it.qty*qty; }
+      recConsumption = {};
+      for(const it of (cp.recipesUsed||[])){ if(checkedRecipeIds.includes(it.recipeId)) recConsumption[it.recipeId] = (recConsumption[it.recipeId]||0) + it.qty*qty; }
+    } else {
+      ingConsumption = ingredientConsumptionForCostProduct(cp, qty);
+      recConsumption = recipeConsumptionForCostProduct(cp, qty);
+      pkgConsumption = packagingConsumptionForCostProduct(cp, qty);
+    }
+
+    const ingLines = Object.entries(ingConsumption).map(([ingId, amt]) => {
+      const ing = iMap[ingId]; if(!ing) return '';
       const after = (ing.currentStock||0) - amt;
-      const warn = after < 0;
-      return `<div class="row" style="font-size:12.5px"><span class="row-label">${esc(ing.name)} (se va a descontar ${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${warn?COLORS.frutillaDark:'inherit'}">quedan ${after.toFixed(1)}</span></div>`;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">Ingrediente: ${esc(ing.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[ing.unit]})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">quedan ${after.toFixed(1)}</span></div>`;
     }).join('');
-    preview.innerHTML = lines ? `<div class="field-label" style="margin-bottom:4px">Se van a descontar estos ingredientes:</div>${lines}` : '';
+    const recLines = Object.entries(recConsumption).map(([recId, amt]) => {
+      const r = DATA.recipes.find(r=>r.id===recId); if(!r) return '';
+      const after = (r.currentStock||0) - amt;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">Receta: ${esc(r.name)} (-${amt.toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">${after<0?'¡no alcanza, faltan '+Math.abs(after).toFixed(1)+'!':'quedan '+after.toFixed(1)}</span></div>`;
+    }).join('');
+    const pkgLines = Object.entries(pkgConsumption).map(([pid, amt]) => {
+      const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return '';
+      const after = (pk.currentStock||0) - amt;
+      return `<div class="row" style="font-size:12.5px"><span class="row-label">Packaging: ${esc(pk.name)} (-${amt})</span><span style="color:${after<0?COLORS.frutillaDark:'inherit'}">quedan ${after}</span></div>`;
+    }).join('');
+    preview.innerHTML = (ingLines||recLines||pkgLines) ? `<div class="field-label" style="margin-bottom:4px">Se va a descontar:</div>${recLines}${ingLines}${pkgLines}` : '';
   };
-  document.getElementById('sm-product').onchange = updatePreview;
-  document.getElementById('sm-type').onchange = updatePreview;
+
+  document.getElementById('sm-product').onchange = () => { renderComponentsChecklist(); updatePreview(); };
+  document.getElementById('sm-type').onchange = () => { renderComponentsChecklist(); updatePreview(); };
   document.getElementById('sm-qty').oninput = updatePreview;
+  renderComponentsChecklist();
+  updatePreview();
+
   document.getElementById('sm-save').onclick = async () => {
     const productId = document.getElementById('sm-product').value;
     const type = document.getElementById('sm-type').value;
@@ -1665,6 +1962,52 @@ function attachStockMovementModalEvents(){
     if(!qty || qty<=0){ alert('Poné una cantidad válida.'); return; }
     const p = DATA.products.find(p=>p.id===productId);
     if(!p) return;
+
+    if(type==='incompleto'){
+      const cp = getCostProduct();
+      if(!cp){ alert('Este postre no está vinculado a una receta de costeo.'); return; }
+      const checkedRecipeIds = Array.from(document.querySelectorAll('.sm-comp-recipe:checked')).map(c=>c.value);
+      const checkedIngIds = Array.from(document.querySelectorAll('.sm-comp-ing:checked')).map(c=>c.value);
+      try{
+        let warnings = [];
+        await Promise.all((cp.directIngredients||[]).filter(it=>checkedIngIds.includes(it.ingredientId)).map(async it => {
+          const ing = DATA.ingredients.find(i=>i.id===it.ingredientId); if(!ing) return;
+          const { data: newStock, error } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: it.ingredientId, p_delta: -(it.qty*qty) });
+          if(error) throw error;
+          if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
+        }));
+        await Promise.all((cp.recipesUsed||[]).filter(it=>checkedRecipeIds.includes(it.recipeId)).map(async it => {
+          const r = DATA.recipes.find(r=>r.id===it.recipeId); if(!r) return;
+          const { data: newStock, error } = await sb.rpc('adjust_recipe_stock', { p_recipe_id: it.recipeId, p_delta: -(it.qty*qty) });
+          if(error) throw error;
+          if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
+        }));
+        const { error: wipErr } = await sb.from('work_in_progress').insert({ product_id: productId, qty, date: todayISO(), used_ingredient_ids: checkedIngIds, used_recipe_ids: checkedRecipeIds });
+        if(wipErr) throw wipErr;
+        await loadAll();
+        closeModal();
+        if(warnings.length) alert(`⚠ Ojo, quedaste con poco stock de: ${warnings.join(', ')}.`);
+      } catch(e){
+        alert('Error al guardar: ' + e.message);
+      }
+      return;
+    }
+
+    let insufficientRecipes = [];
+    if(type==='produccion' && p.costProductId){
+      const cp0 = DATA.costProducts.find(cp=>cp.id===p.costProductId);
+      if(cp0){
+        const recConsumption0 = recipeConsumptionForCostProduct(cp0, qty);
+        for(const [recId, amt] of Object.entries(recConsumption0)){
+          const r = DATA.recipes.find(r=>r.id===recId);
+          if(r && (r.currentStock||0) < amt) insufficientRecipes.push(`${r.name} (faltan ${(amt-(r.currentStock||0)).toFixed(1)} ${UNIT_LABEL[r.yieldUnit]||r.yieldUnit})`);
+        }
+      }
+    }
+    if(insufficientRecipes.length){
+      if(!confirm(`No hay suficiente stock preparado de: ${insufficientRecipes.join(', ')}. ¿Producir igual? (el stock de esa receta va a quedar en negativo)`)) return;
+    }
+
     try{
       if(type==='produccion'){
         const { error } = await sb.rpc('adjust_stock', { p_product_id: productId, p_delta: qty });
@@ -1673,13 +2016,26 @@ function attachStockMovementModalEvents(){
         if(p.costProductId){
           const cp = DATA.costProducts.find(cp=>cp.id===p.costProductId);
           if(cp){
-            const consumption = ingredientConsumptionForCostProduct(cp, qty);
-            await Promise.all(Object.entries(consumption).map(async ([ingId, amt]) => {
-              const ing = DATA.ingredients.find(i=>i.id===ingId);
-              if(!ing) return;
+            const ingConsumption = ingredientConsumptionForCostProduct(cp, qty);
+            await Promise.all(Object.entries(ingConsumption).map(async ([ingId, amt]) => {
+              const ing = DATA.ingredients.find(i=>i.id===ingId); if(!ing) return;
               const { data: newStock, error: e2 } = await sb.rpc('adjust_ingredient_stock', { p_ingredient_id: ingId, p_delta: -amt });
               if(e2) throw e2;
               if(ing.lowStockAlert>0 && newStock<=ing.lowStockAlert) warnings.push(ing.name);
+            }));
+            const recConsumption = recipeConsumptionForCostProduct(cp, qty);
+            await Promise.all(Object.entries(recConsumption).map(async ([recId, amt]) => {
+              const r = DATA.recipes.find(r=>r.id===recId); if(!r) return;
+              const { data: newStock, error: e2 } = await sb.rpc('adjust_recipe_stock', { p_recipe_id: recId, p_delta: -amt });
+              if(e2) throw e2;
+              if(r.lowStockAlert>0 && newStock<=r.lowStockAlert) warnings.push(r.name);
+            }));
+            const pkgConsumption = packagingConsumptionForCostProduct(cp, qty);
+            await Promise.all(Object.entries(pkgConsumption).map(async ([pid, amt]) => {
+              const pk = DATA.packagingCatalog.find(pk=>pk.id===pid); if(!pk) return;
+              const { data: newStock, error: e2 } = await sb.rpc('adjust_packaging_stock', { p_packaging_id: pid, p_delta: -amt });
+              if(e2) throw e2;
+              if(pk.lowStockAlert>0 && newStock<=pk.lowStockAlert) warnings.push(pk.name);
             }));
           }
         }

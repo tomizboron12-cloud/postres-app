@@ -244,3 +244,40 @@ returns numeric as $$
   where id = p_ingredient_id
   returning current_stock;
 $$ language sql;
+
+-- ============================================================
+-- Stock de recetas preparadas, stock de packaging y producción
+-- incompleta (work in progress).
+-- ============================================================
+alter table recipes add column if not exists current_stock numeric not null default 0;
+alter table recipes add column if not exists low_stock_alert numeric not null default 0;
+
+alter table packaging_catalog add column if not exists current_stock numeric not null default 0;
+alter table packaging_catalog add column if not exists low_stock_alert numeric not null default 0;
+
+create table if not exists work_in_progress (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid references products(id) on delete set null,
+  qty numeric not null,
+  date date not null default current_date,
+  used_ingredient_ids uuid[] not null default '{}',
+  used_recipe_ids uuid[] not null default '{}',
+  created_at timestamptz not null default now()
+);
+alter table work_in_progress enable row level security;
+create policy "anon full access" on work_in_progress for all using (true) with check (true);
+alter publication supabase_realtime add table work_in_progress;
+
+create or replace function adjust_recipe_stock(p_recipe_id uuid, p_delta numeric)
+returns numeric as $$
+  update recipes set current_stock = current_stock + p_delta
+  where id = p_recipe_id
+  returning current_stock;
+$$ language sql;
+
+create or replace function adjust_packaging_stock(p_packaging_id uuid, p_delta numeric)
+returns numeric as $$
+  update packaging_catalog set current_stock = current_stock + p_delta
+  where id = p_packaging_id
+  returning current_stock;
+$$ language sql;
