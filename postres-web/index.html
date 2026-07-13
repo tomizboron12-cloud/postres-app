@@ -227,11 +227,16 @@ function computeMetrics(){
     const mk = monthKey(s.date);
     byMonth[mk] = byMonth[mk] || { revenue:0, cost:0, grossProfit:0, profit:0, grossByOwner:{}, byOwner:{} };
     for(const it of s.items){
-      const rev = it.price*it.qty, cost = it.cost*it.qty, profit = rev-cost;
+      const rev = it.price*it.qty, cost = it.cost*it.qty, itemGrossProfit = rev-cost;
       byMonth[mk].revenue += rev; byMonth[mk].cost += cost;
-      byMonth[mk].grossProfit += profit; byMonth[mk].profit += profit;
-      byMonth[mk].grossByOwner[it.ownerId] = (byMonth[mk].grossByOwner[it.ownerId]||0) + profit;
-      byMonth[mk].byOwner[it.ownerId] = (byMonth[mk].byOwner[it.ownerId]||0) + profit;
+      // grossProfit es solo INFORMATIVO (ventas - costo de producto), para ver márgenes.
+      byMonth[mk].grossProfit += itemGrossProfit;
+      byMonth[mk].grossByOwner[it.ownerId] = (byMonth[mk].grossByOwner[it.ownerId]||0) + itemGrossProfit;
+      // profit (Ganancia Neta) arranca de las VENTAS, no del margen. El costo del
+      // producto NO se resta acá: la plata que se gasta comprando mercadería ya se
+      // descuenta más abajo, una sola vez, a través de las Compras/Gastos reales.
+      byMonth[mk].profit += rev;
+      byMonth[mk].byOwner[it.ownerId] = (byMonth[mk].byOwner[it.ownerId]||0) + rev;
     }
   }
   for(const pur of DATA.purchases){
