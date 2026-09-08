@@ -151,6 +151,8 @@ let SEARCH_Q = '';
 let LOADED = false;
 let SAVING = false;
 let DASHBOARD_EXPANDED = false;
+let DASH_RANGE = { preset: 'today', start: null, end: null };
+let SALES_RANGE = { preset: 'all', start: null, end: null };
 
 function ownerName(id){ return (DATA.owners.find(o=>o.id===id)||{}).name || id; }
 function clientMap(){ return Object.fromEntries(DATA.clients.map(c=>[c.id,c])); }
@@ -220,6 +222,82 @@ async function init(){
   await loadAll();
   subscribeRealtime();
   render();
+}
+
+/* ===================== FILTRO DE PERÍODO (Resumen / Ventas) ===================== */
+// Nada se borra nunca acá — esto solo decide qué rango de fechas se muestra.
+// Ingredientes, recetas, productos, costeo, etc. no tienen ningún filtro de fecha.
+function addDaysISO(iso, days){
+  const d = new Date((iso || todayISO()) + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0,10);
+}
+function rangeBounds(range){
+  const today = todayISO();
+  switch(range.preset){
+    case 'today': return { start: today, end: today };
+    case 'yesterday': { const y = addDaysISO(today, -1); return { start: y, end: y }; }
+    case '7d': return { start: addDaysISO(today, -6), end: today };
+    case '30d': return { start: addDaysISO(today, -29), end: today };
+    case 'custom': return { start: range.start || today, end: range.end || today };
+    default: return { start: null, end: null }; // 'all' = sin filtro
+  }
+}
+function inRange(dateISO, bounds){
+  if(!bounds.start && !bounds.end) return true;
+  return dateISO >= bounds.start && dateISO <= bounds.end;
+}
+function rangeLabel(range){
+  const b = rangeBounds(range);
+  switch(range.preset){
+    case 'today': return 'Hoy';
+    case 'yesterday': return 'Ayer';
+    case '7d': return 'Últimos 7 días';
+    case '30d': return 'Últimos 30 días';
+    case 'custom': return `${b.start} a ${b.end}`;
+    default: return 'Todo el historial';
+  }
+}
+const RANGE_PRESETS = [
+  {id:'today', label:'Hoy'},
+  {id:'yesterday', label:'Ayer'},
+  {id:'7d', label:'7 días'},
+  {id:'30d', label:'30 días'},
+  {id:'custom', label:'Personalizado'},
+];
+function renderRangePicker(range, prefix, includeAll){
+  const presets = includeAll ? [{id:'all', label:'Todo'}, ...RANGE_PRESETS] : RANGE_PRESETS;
+  return `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+      ${presets.map(p => `<button class="btn ${range.preset===p.id?'btn-dark':'btn-ghost'} range-preset-btn" data-prefix="${prefix}" data-preset="${p.id}" style="padding:7px 12px;font-size:13px">${p.label}</button>`).join('')}
+    </div>
+    ${range.preset==='custom' ? `
+      <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="margin-bottom:0"><div class="field-label">Desde</div><input type="date" class="input range-custom-start" data-prefix="${prefix}" value="${range.start||todayISO()}"/></div>
+        <div class="field" style="margin-bottom:0"><div class="field-label">Hasta</div><input type="date" class="input range-custom-end" data-prefix="${prefix}" value="${range.end||todayISO()}"/></div>
+      </div>
+    ` : '<div style="margin-bottom:8px"></div>'}
+  `;
+}
+function computeRangeMetrics(bounds){
+  const m = { revenue:0, cost:0, grossProfit:0, profit:0, grossByOwner:{}, byOwner:{} };
+  for(const s of DATA.sales){
+    if(!inRange(s.date, bounds)) continue;
+    for(const it of s.items){
+      const rev = it.price*it.qty, cost = it.cost*it.qty, itemGrossProfit = rev-cost;
+      m.revenue += rev; m.cost += cost;
+      m.grossProfit += itemGrossProfit;
+      m.grossByOwner[it.ownerId] = (m.grossByOwner[it.ownerId]||0) + itemGrossProfit;
+      m.profit += rev;
+      m.byOwner[it.ownerId] = (m.byOwner[it.ownerId]||0) + rev;
+    }
+  }
+  for(const pur of DATA.purchases){
+    if(!inRange(pur.date, bounds)) continue;
+    m.profit -= pur.amount;
+    m.byOwner[pur.ownerId] = (m.byOwner[pur.ownerId]||0) - pur.amount;
+  }
+  return m;
 }
 
 function computeMetrics(){
@@ -426,46 +504,50 @@ function renderLogin(){
 
 /* ===================== DASHBOARD ===================== */
 function renderDashboard(){
-  const metrics = computeMetrics();
-  const currentMonth = monthKey(todayISO());
-  const thisMonth = metrics[currentMonth] || { revenue:0, cost:0, grossProfit:0, profit:0, grossByOwner:{}, byOwner:{} };
-  const months = Object.keys(metrics).sort().reverse().slice(0,6);
+  const bounds = rangeBounds(DASH_RANGE);
+  const periodMetrics = computeRangeMetrics(bounds);
+  const monthlyMetrics = computeMetrics();
+  const months = Object.keys(monthlyMetrics).sort().reverse().slice(0,6);
   const lowStock = DATA.products.filter(p=>p.trackStock && p.stock<=p.lowStockAlert);
-  const totalUnits = DATA.sales.reduce((a,s)=>a+s.items.reduce((b,it)=>b+it.qty,0),0);
+  const periodSales = DATA.sales.filter(s=>inRange(s.date, bounds));
+  const totalUnits = periodSales.reduce((a,s)=>a+s.items.reduce((b,it)=>b+it.qty,0),0);
 
   const counts = {};
-  for(const s of DATA.sales) for(const it of s.items) counts[it.productName]=(counts[it.productName]||0)+it.qty;
+  for(const s of periodSales) for(const it of s.items) counts[it.productName]=(counts[it.productName]||0)+it.qty;
   const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
   const topProducts = entries.slice(0,3).map(([name,qty])=>({name,qty}));
 
-  const gastosDelMes = DATA.purchases.filter(p=>monthKey(p.date)===currentMonth).reduce((a,p)=>a+p.amount,0);
-  const gastosOperativos = thisMonth.grossProfit - thisMonth.profit;
-  const margenBruto = thisMonth.revenue>0 ? Math.round((thisMonth.grossProfit/thisMonth.revenue)*100) : 0;
-  const margenNeto = thisMonth.revenue>0 ? Math.round((thisMonth.profit/thisMonth.revenue)*100) : 0;
+  const periodPurchases = DATA.purchases.filter(p=>inRange(p.date, bounds));
+  const gastosDelPeriodo = periodPurchases.reduce((a,p)=>a+p.amount,0);
+  const gastosOperativos = periodMetrics.grossProfit - periodMetrics.profit;
+  const margenBruto = periodMetrics.revenue>0 ? Math.round((periodMetrics.grossProfit/periodMetrics.revenue)*100) : 0;
+  const margenNeto = periodMetrics.revenue>0 ? Math.round((periodMetrics.profit/periodMetrics.revenue)*100) : 0;
 
   return `
     <div class="header-row">
-      <div><div class="header-title serif">Resumen</div><div class="header-sub">${monthLabel(currentMonth)}</div></div>
+      <div><div class="header-title serif">Resumen</div><div class="header-sub">${rangeLabel(DASH_RANGE)}</div></div>
     </div>
 
+    ${renderRangePicker(DASH_RANGE, 'dash', false)}
+
     <div class="statgrid">
-      <div class="card stat"><div class="stat-label">Ventas del mes ${ICONS.bag}</div><div class="stat-value num">${money(thisMonth.revenue)}</div></div>
-      <div class="card stat"><div class="stat-label">Ganancia neta ${ICONS.trending}</div><div class="stat-value num" style="color:${thisMonth.profit>=0?COLORS.menta:COLORS.frutillaDark}">${money(thisMonth.profit)}</div></div>
-      <div class="card stat"><div class="stat-label">Postres vendidos (total) ${ICONS.cake}</div><div class="stat-value num">${totalUnits}</div></div>
+      <div class="card stat"><div class="stat-label">Ventas del período ${ICONS.bag}</div><div class="stat-value num">${money(periodMetrics.revenue)}</div></div>
+      <div class="card stat"><div class="stat-label">Ganancia neta ${ICONS.trending}</div><div class="stat-value num" style="color:${periodMetrics.profit>=0?COLORS.menta:COLORS.frutillaDark}">${money(periodMetrics.profit)}</div></div>
+      <div class="card stat"><div class="stat-label">Postres vendidos ${ICONS.cake}</div><div class="stat-value num">${totalUnits}</div></div>
     </div>
 
     <div class="statgrid">
       ${DATA.owners.map(o => `
         <div class="card" style="flex:1;min-width:220px">
-          <div class="stat-label">Ganancia NETA de ${esc(o.name)} este mes</div>
-          <div class="num" style="font-size:28px;font-weight:700;margin-top:6px;color:${(thisMonth.byOwner[o.id]||0)>=0?COLORS.menta:COLORS.frutillaDark}">${money(thisMonth.byOwner[o.id]||0)}</div>
+          <div class="stat-label">Ganancia NETA de ${esc(o.name)} en el período</div>
+          <div class="num" style="font-size:28px;font-weight:700;margin-top:6px;color:${(periodMetrics.byOwner[o.id]||0)>=0?COLORS.menta:COLORS.frutillaDark}">${money(periodMetrics.byOwner[o.id]||0)}</div>
         </div>
       `).join('')}
     </div>
 
     <button class="btn btn-ghost" id="dash-toggle-metrics" style="margin-bottom:18px">${DASHBOARD_EXPANDED?'▲ Ocultar métricas detalladas':'▼ Ver métricas detalladas (costos, márgenes, comparativas)'}</button>
 
-    ${DASHBOARD_EXPANDED ? renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margenBruto, margenNeto) : ''}
+    ${DASHBOARD_EXPANDED ? renderDetailedMetrics(periodMetrics, gastosDelPeriodo, gastosOperativos, margenBruto, margenNeto, bounds) : ''}
 
     ${lowStock.length>0 ? `
       <div class="card" style="margin-bottom:18px;border-color:${COLORS.frutilla};background:#FFF4F1">
@@ -474,13 +556,13 @@ function renderDashboard(){
       </div>
     ` : ''}
 
-    ${renderExpenseSummary()}
+    ${renderExpenseSummary(bounds)}
 
     <div class="statgrid" style="align-items:flex-start">
       <div class="card" style="flex:2;min-width:300px">
         <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:12px">Últimos meses</div>
         ${months.length===0 ? `<div class="empty" style="padding:0;text-align:left">Todavía no cargaste ventas.</div>` :
-          months.map(mk => { const m = metrics[mk]; return `
+          months.map(mk => { const m = monthlyMetrics[mk]; return `
             <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:4px">
               <span style="font-weight:600">${monthLabel(mk)}</span>
               <span class="num" style="display:flex;gap:18px;flex-wrap:wrap">
@@ -492,7 +574,7 @@ function renderDashboard(){
       </div>
       <div class="card" style="flex:1;min-width:220px">
         <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:12px">Top 3 postres más vendidos</div>
-        ${topProducts.length===0 ? `<div class="empty" style="padding:0;text-align:left">Sin datos todavía.</div>` :
+        ${topProducts.length===0 ? `<div class="empty" style="padding:0;text-align:left">Sin datos en este período.</div>` :
           topProducts.map((tp,i) => `
             <div style="display:flex;align-items:center;gap:10px;padding:6px 0">
               <div style="width:22px;height:22px;border-radius:999px;background:${i===0?COLORS.dulce:i===1?COLORS.frutilla:COLORS.menta};color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i+1}</div>
@@ -507,12 +589,11 @@ function renderDashboard(){
   `;
 }
 
-function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margenBruto, margenNeto){
+function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margenBruto, margenNeto, bounds){
   const maxOwnerGross = Math.max(1, ...DATA.owners.map(o => Math.abs(thisMonth.grossByOwner[o.id]||0)));
-  const currentMonth = monthKey(todayISO());
-  const monthPurchases = DATA.purchases.filter(p => monthKey(p.date) === currentMonth);
+  const periodPurchases = DATA.purchases.filter(p => inRange(p.date, bounds));
   const byCategory = {};
-  for(const p of monthPurchases) byCategory[p.category] = (byCategory[p.category]||0) + p.amount;
+  for(const p of periodPurchases) byCategory[p.category] = (byCategory[p.category]||0) + p.amount;
   const catEntries = Object.entries(byCategory).sort((a,b)=>b[1]-a[1]);
   const catColors = [COLORS.frutilla, COLORS.dulce, COLORS.menta, COLORS.chocoSoft, '#9b7fb0'];
   const totalCats = catEntries.reduce((a,[,v])=>a+v,0) || 1;
@@ -525,7 +606,7 @@ function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margen
 
   return `
     <div class="card" style="margin-bottom:18px">
-      <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:16px">Métricas detalladas del mes</div>
+      <div class="serif" style="font-weight:700;font-size:16px;margin-bottom:16px">Métricas detalladas del período</div>
 
       <div style="display:flex;gap:24px;flex-wrap:wrap;align-items:center;margin-bottom:20px">
         <div style="width:120px;height:120px;border-radius:999px;flex-shrink:0;background:conic-gradient(${COLORS.menta} 0% ${margenNeto}%, ${COLORS.line} ${margenNeto}% 100%);display:flex;align-items:center;justify-content:center">
@@ -538,7 +619,7 @@ function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margen
           <div class="row" style="font-size:13.5px"><span class="row-label">Ventas totales</span><span class="row-value num">${money(thisMonth.revenue)}</span></div>
           <div class="row" style="font-size:13.5px"><span class="row-label">Costo de productos vendidos</span><span class="row-value num">${money(thisMonth.cost)}</span></div>
           <div class="row" style="font-size:13.5px"><span class="row-label">Ganancia bruta (margen ${margenBruto}%)</span><span class="row-value num" style="color:${COLORS.menta}">${money(thisMonth.grossProfit)}</span></div>
-          <div class="row" style="font-size:13.5px"><span class="row-label">Gastos del mes (ingredientes, packaging, delivery, todo)</span><span class="row-value num" style="color:${COLORS.frutillaDark}">-${money(gastosOperativos)}</span></div>
+          <div class="row" style="font-size:13.5px"><span class="row-label">Gastos del período (ingredientes, packaging, delivery, todo)</span><span class="row-value num" style="color:${COLORS.frutillaDark}">-${money(gastosOperativos)}</span></div>
           <div class="row" style="font-size:14px;border-top:1px solid var(--line);margin-top:4px;padding-top:6px"><span class="row-label" style="font-weight:700">Ganancia neta (margen ${margenNeto}%)</span><span class="row-value bold num" style="color:${COLORS.menta}">${money(thisMonth.profit)}</span></div>
         </div>
       </div>
@@ -557,7 +638,7 @@ function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margen
       }).join('')}
 
       ${catEntries.length>0 ? `
-        <div class="field-label" style="margin:16px 0 8px">Gastos del mes por categoría (${money(gastosDelMes)} total)</div>
+        <div class="field-label" style="margin:16px 0 8px">Gastos del período por categoría (${money(gastosDelMes)} total)</div>
         <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
           <div style="width:80px;height:80px;border-radius:999px;flex-shrink:0;background:conic-gradient(${gradientStops})"></div>
           <div style="flex:1;min-width:180px">
@@ -576,13 +657,12 @@ function renderDetailedMetrics(thisMonth, gastosDelMes, gastosOperativos, margen
   `;
 }
 
-function renderExpenseSummary(){
-  const currentMonth = monthKey(todayISO());
-  const monthPurchases = DATA.purchases.filter(p => monthKey(p.date) === currentMonth);
-  if(monthPurchases.length === 0) return '';
-  const total = monthPurchases.reduce((a,p)=>a+p.amount, 0);
+function renderExpenseSummary(bounds){
+  const periodPurchases = DATA.purchases.filter(p => inRange(p.date, bounds));
+  if(periodPurchases.length === 0) return '';
+  const total = periodPurchases.reduce((a,p)=>a+p.amount, 0);
   const byCategoryOwner = {};
-  for(const p of monthPurchases){
+  for(const p of periodPurchases){
     const key = p.category + '|' + p.ownerId;
     if(!byCategoryOwner[key]) byCategoryOwner[key] = { category: p.category, ownerId: p.ownerId, amount: 0 };
     byCategoryOwner[key].amount += p.amount;
@@ -592,10 +672,10 @@ function renderExpenseSummary(){
   return `
     <div class="card" style="margin-bottom:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;flex-wrap:wrap;gap:6px">
-        <div class="serif" style="font-weight:700;font-size:16px">Gastos del mes (compras / stock / ingredientes)</div>
+        <div class="serif" style="font-weight:700;font-size:16px">Gastos del período (compras / stock / ingredientes)</div>
         <span class="num" style="font-weight:800;color:${COLORS.frutillaDark}">-${money(total)}</span>
       </div>
-      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">Todo este monto se resta de la Ganancia Neta del mes, sin importar la categoría.</div>
+      <div style="font-size:12px;color:var(--chocoSoft);margin-bottom:10px">Todo este monto se resta de la Ganancia Neta del período, sin importar la categoría.</div>
       ${rows.map(r => `
         <div class="row" style="font-size:13.5px">
           <span class="row-label">${esc(r.category)} <span style="color:${r.ownerId==='mama'?COLORS.dulce:COLORS.frutilla};font-weight:700">(${esc(ownerName(r.ownerId))})</span></span>
@@ -609,19 +689,23 @@ function renderExpenseSummary(){
 /* ===================== VENTAS ===================== */
 function renderSales(){
   const cMap = clientMap();
+  const bounds = rangeBounds(SALES_RANGE);
   const sales = [...DATA.sales].sort((a,b)=> a.date < b.date ? 1 : -1);
   const filtered = sales.filter(s => {
     const name = s.clientId ? (cMap[s.clientId]?.name||'') : 'Consumidor final';
-    return name.toLowerCase().includes(SEARCH_Q.toLowerCase());
+    return name.toLowerCase().includes(SEARCH_Q.toLowerCase()) && inRange(s.date, bounds);
   });
+  const filteredRevenue = filtered.reduce((a,s)=>a+s.items.reduce((b,it)=>b+it.price*it.qty,0),0);
 
   return `
     <div class="header-row">
       <div><div class="header-title serif">Ventas</div><div class="header-sub">Cargá cada venta con sus productos: la ganancia y el reparto se calculan solos</div></div>
       <button class="btn btn-primary" data-open-modal="newSale">${ICONS.plus} Nueva venta</button>
     </div>
+    ${renderRangePicker(SALES_RANGE, 'sales', true)}
     <div class="searchwrap">${ICONS.search}<input class="input" id="sale-search" placeholder="Buscar por cliente..." value="${esc(SEARCH_Q)}"/></div>
-    ${filtered.length===0 ? `<div class="card"><div class="empty">Todavía no hay ventas cargadas. Sumá la primera con "Nueva venta".</div></div>` : ''}
+    ${filtered.length>0 ? `<div style="font-size:12.5px;color:var(--chocoSoft);margin-bottom:10px" class="num">${filtered.length} venta${filtered.length>1?'s':''} · total ${money(filteredRevenue)}</div>` : ''}
+    ${filtered.length===0 ? `<div class="card"><div class="empty">No hay ventas ${SALES_RANGE.preset==='all'?'cargadas todavía':'en este período'}. ${SALES_RANGE.preset==='all'?'Sumá la primera con "Nueva venta".':''}</div></div>` : ''}
     <div class="stack">
       ${filtered.map(s => {
         const revenue = s.items.reduce((a,it)=>a+it.price*it.qty,0);
@@ -1217,6 +1301,21 @@ async function removePackagingItem(id){
 function attachTabEvents(){
   const dashToggle = document.getElementById('dash-toggle-metrics');
   if(dashToggle) dashToggle.onclick = () => { DASHBOARD_EXPANDED = !DASHBOARD_EXPANDED; render(); };
+  document.querySelectorAll('.range-preset-btn').forEach(b => b.onclick = () => {
+    const state = b.dataset.prefix==='dash' ? DASH_RANGE : SALES_RANGE;
+    state.preset = b.dataset.preset;
+    if(state.preset!=='custom'){ state.start = null; state.end = null; }
+    else { if(!state.start) state.start = todayISO(); if(!state.end) state.end = todayISO(); }
+    render();
+  });
+  document.querySelectorAll('.range-custom-start').forEach(el => el.onchange = () => {
+    const state = el.dataset.prefix==='dash' ? DASH_RANGE : SALES_RANGE;
+    state.start = el.value; render();
+  });
+  document.querySelectorAll('.range-custom-end').forEach(el => el.onchange = () => {
+    const state = el.dataset.prefix==='dash' ? DASH_RANGE : SALES_RANGE;
+    state.end = el.value; render();
+  });
   document.querySelectorAll('[data-open-modal]').forEach(b => b.onclick = () => { MODAL = { type: b.dataset.openModal }; renderModal(); });
   document.querySelectorAll('[data-remove-sale]').forEach(b => b.onclick = () => removeSale(b.dataset.removeSale));
   document.querySelectorAll('[data-remove-product]').forEach(b => b.onclick = () => removeProduct(b.dataset.removeProduct));
