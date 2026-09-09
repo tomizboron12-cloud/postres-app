@@ -431,6 +431,8 @@ function render(){
 
   const lowStock = DATA.products.filter(p=>p.trackStock && p.stock<=p.lowStockAlert);
 
+  const prevNavScroll = document.querySelector('.mobile-navbar')?.scrollLeft || 0;
+
   root.innerHTML = `
     <div class="app">
       <div class="mobile-topbar">
@@ -461,6 +463,9 @@ function render(){
       <div class="main" id="main"></div>
     </div>
   `;
+
+  const mobileNavbar = document.querySelector('.mobile-navbar');
+  if(mobileNavbar) mobileNavbar.scrollLeft = prevNavScroll;
 
   document.querySelectorAll('[data-nav]').forEach(btn => {
     btn.onclick = () => { TAB = btn.dataset.nav; render(); };
