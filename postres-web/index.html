@@ -185,7 +185,7 @@ async function loadAll(){
   }));
   if(purchasesR.data) DATA.purchases = purchasesR.data.map(p=>({id:p.id, description:p.description, amount:+p.amount, date:p.date, ownerId:p.owner_id, category:p.category, ingredientId:p.ingredient_id, ingredientQty:p.ingredient_qty!=null?+p.ingredient_qty:null, packagingId:p.packaging_id, packagingQty:p.packaging_qty!=null?+p.packaging_qty:null}));
   if(loyaltyR.data) DATA.loyalty = {threshold:loyaltyR.data.threshold, reward:loyaltyR.data.reward};
-  if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, packageQty:+i.package_qty, unit:i.unit, currentStock:+i.current_stock||0, lowStockAlert:+i.low_stock_alert||0}));
+  if(ingredientsR.data) DATA.ingredients = ingredientsR.data.map(i=>({id:i.id, name:i.name, price:+i.price, realPrice:i.real_price!=null?+i.real_price:null, packageQty:+i.package_qty, unit:i.unit, currentStock:+i.current_stock||0, lowStockAlert:+i.low_stock_alert||0}));
   if(recipesR.data) DATA.recipes = recipesR.data.map(r=>({
     id:r.id, name:r.name, yieldQty:+r.yield_qty, yieldUnit:r.yield_unit, currentStock:+r.current_stock||0, lowStockAlert:+r.low_stock_alert||0,
     items:(r.recipe_items||[]).map(it=>({ingredientId:it.ingredient_id, qty:+it.qty}))
@@ -1092,7 +1092,8 @@ function renderIngredients(){
                 </div>
               </div>
               <div class="num" style="margin-top:10px;font-size:13.5px">
-                <div class="row"><span class="row-label">Precio pagado</span><span class="row-value">${money(ing.price)}</span></div>
+                <div class="row"><span class="row-label">Precio estimado</span><span class="row-value">${money(ing.price)}</span></div>
+                ${ing.realPrice!=null && ing.realPrice!==ing.price ? `<div class="row"><span class="row-label">Precio real pagado</span><span class="row-value" style="color:${COLORS.chocoSoft}">${money(ing.realPrice)}</span></div>` : ''}
                 <div class="row"><span class="row-label">Cantidad del envase</span><span class="row-value">${ing.packageQty} ${UNIT_LABEL[ing.unit]}</span></div>
                 <div class="row"><span class="row-label">Costo por ${UNIT_LABEL[ing.unit]}</span><span class="row-value bold" style="color:${COLORS.menta}">${money(costUnit)}</span></div>
                 <div class="row" style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px"><span class="row-label">Stock actual</span><span class="row-value" style="color:${low?COLORS.frutillaDark:'inherit'}">${fmtQty(ing.currentStock)} ${UNIT_LABEL[ing.unit]}</span></div>
@@ -1826,9 +1827,11 @@ function ingredientModalHtml(editing){
     ${modalHeader(editing?'Editar ingrediente':'Nuevo ingrediente')}
     <div class="field"><div class="field-label">Nombre</div><input class="input" id="ing-name" value="${esc(editing?.name||'')}" placeholder="Ej: Harina"/></div>
     <div style="display:flex;gap:10px">
-      <div style="flex:1" class="field"><div class="field-label">Precio pagado</div><input type="number" class="input" id="ing-price" value="${editing?.price ?? ''}"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Precio estimado</div><input type="number" class="input" id="ing-price" value="${editing?.price ?? ''}"/></div>
       <div style="flex:1" class="field"><div class="field-label">Cantidad del envase</div><input type="number" class="input" id="ing-qty" value="${editing?.packageQty ?? ''}"/></div>
     </div>
+    <div class="field"><div class="field-label">Precio real pagado (opcional)</div><input type="number" class="input" id="ing-realprice" value="${editing?.realPrice ?? ''}" placeholder="Si compraste más caro/barato que lo habitual"/></div>
+    <div style="font-size:12px;color:var(--chocoSoft);margin:-6px 0 12px">El <b>estimado</b> es el que se usa para calcular el costo de recetas y postres (así mantenés tu margen aunque un día compres más caro). El <b>real</b> es solo para que sepas cuánto pagaste esa vez — no afecta ningún cálculo.</div>
     <div class="field"><div class="field-label">Unidad</div>
       <select class="input" id="ing-unit">
         <option value="g" ${editing?.unit==='g'?'selected':''}>Gramos (g)</option>
@@ -1851,13 +1854,15 @@ function attachIngredientModalEvents(editing){
   document.getElementById('ing-save').onclick = async () => {
     const name = document.getElementById('ing-name').value.trim();
     const price = +document.getElementById('ing-price').value || 0;
+    const realPriceRaw = document.getElementById('ing-realprice').value;
+    const realPrice = realPriceRaw === '' ? price : (+realPriceRaw || 0);
     const packageQty = +document.getElementById('ing-qty').value || 0;
     const unit = document.getElementById('ing-unit').value;
     const currentStock = +document.getElementById('ing-stock').value || 0;
     const lowStockAlert = +document.getElementById('ing-lowstock').value || 0;
     if(!name){ alert('Poné un nombre.'); return; }
     if(!packageQty){ alert('Poné la cantidad que trae el envase.'); return; }
-    const payload = { name, price, package_qty: packageQty, unit, current_stock: currentStock, low_stock_alert: lowStockAlert };
+    const payload = { name, price, real_price: realPrice, package_qty: packageQty, unit, current_stock: currentStock, low_stock_alert: lowStockAlert };
     const { error } = editing
       ? await sb.from('ingredients').update(payload).eq('id', editing.id)
       : await sb.from('ingredients').insert(payload);

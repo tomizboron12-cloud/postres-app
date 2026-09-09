@@ -222,6 +222,8 @@ create policy "anon full access" on loyalty_config for all using (true) with che
 -- ============================================================
 alter table ingredients add column if not exists current_stock numeric not null default 0;
 alter table ingredients add column if not exists low_stock_alert numeric not null default 0;
+alter table ingredients add column if not exists real_price numeric;
+update ingredients set real_price = price where real_price is null;
 
 alter table products add column if not exists cost_product_id uuid references cost_products(id) on delete set null;
 
