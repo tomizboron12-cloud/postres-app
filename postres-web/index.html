@@ -1180,9 +1180,55 @@ async function removeOrder(id){
   await loadAll(); render();
 }
 async function markOrderDelivered(id){
-  const { error } = await sb.from('custom_orders').update({ status:'entregado' }).eq('id', id);
-  if(error){ alert('Error: ' + error.message); return; }
-  await loadAll(); render();
+  const o = DATA.customOrders.find(o=>o.id===id);
+  if(!o) return;
+  if(!confirm(`Se va a cargar como venta en Ventas (por ${money(o.totalAmount)}) y el encargo va a quedar como entregado. ¿Confirmar?`)) return;
+  try{
+    // Para cada item, si el sabor coincide con un producto real de esa categoría,
+    // usamos su costo/precio/dueño de catálogo; si no, queda sin costo conocido
+    // (no afecta el total cobrado, que sale del total del encargo).
+    const matched = (o.items||[]).map(it => {
+      const product = it.categoryId ? DATA.products.find(p=>p.categoryId===it.categoryId && p.name===it.flavor) : null;
+      return { ...it, product, unitPrice: product ? product.price : 0, unitCost: product ? product.cost : 0 };
+    });
+    const totalQty = matched.reduce((a,it)=>a+it.qty,0) || 1;
+    const weightSum = matched.reduce((a,it)=>a+it.unitPrice*it.qty,0);
+    const saleItemRows = matched.map(it => {
+      const share = weightSum > 0 ? (it.unitPrice*it.qty)/weightSum : it.qty/totalQty;
+      const itemRevenue = share * (o.totalAmount||0);
+      const ownerId = it.product ? it.product.ownerId : (DATA.owners[0]?.id || '');
+      const label = it.categoryName ? `${it.categoryName}${it.flavor?` — ${it.flavor}`:''}` : (it.flavor || 'Producto');
+      return { productId: it.product?it.product.id:null, productName: label, ownerId, qty: it.qty, price: it.qty>0?itemRevenue/it.qty:0, cost: it.unitCost };
+    });
+
+    // El cliente ya suele existir (se crea al cargar el encargo); esto lo vincula
+    // si hiciera falta y suma el conteo de fidelidad recién ahora que se entrega.
+    const qtySum = matched.reduce((a,it)=>a+it.qty,0);
+    const { clientId, rewardMsg } = await resolveOrCreateClientForSale(o.clientName, qtySum);
+
+    const paymentMethod = o.remainingMethod || o.depositMethod || 'Otro';
+    const { data: saleRow, error: saleErr } = await sb.from('sales').insert({ date: todayISO(), client_id: clientId, payment_method: paymentMethod, discount: 0 }).select().single();
+    if(saleErr) throw saleErr;
+
+    const itemRows = saleItemRows.map(it => ({ sale_id: saleRow.id, product_id: it.productId, product_name: it.productName, owner_id: it.ownerId, qty: it.qty, cost: it.cost, price: it.price }));
+    const { error: itemsErr } = await sb.from('sale_items').insert(itemRows);
+    if(itemsErr) throw itemsErr;
+
+    for(const it of matched){
+      if(it.product && it.product.trackStock){
+        await sb.rpc('adjust_stock', { p_product_id: it.product.id, p_delta: -it.qty });
+      }
+    }
+
+    const { error } = await sb.from('custom_orders').update({ status:'entregado', client_id: clientId }).eq('id', id);
+    if(error) throw error;
+
+    await loadAll();
+    render();
+    if(rewardMsg) alert(rewardMsg);
+  } catch(e){
+    alert('Error al entregar el encargo: ' + e.message);
+  }
 }
 async function markOrderRemainingPaid(id){
   const o = DATA.customOrders.find(o=>o.id===id);
@@ -1367,9 +1413,7 @@ async function saveOrder(editing){
   const saveBtn = document.getElementById('ord-save');
   if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'Guardando...'; }
   try{
-    let clientId = null;
-    const existing = DATA.clients.find(c => c.name.trim().toLowerCase() === clientName.toLowerCase());
-    if(existing) clientId = existing.id;
+    const clientId = await resolveOrCreateClientBasic(clientName);
 
     const payload = {
       client_name: clientName, client_id: clientId, order_date: orderDate, due_date: dueDate, due_time: dueTime || null,
@@ -1838,26 +1882,33 @@ function modalHeader(title){
 }
 
 /* ---- Nueva venta ---- */
-let SALE_ITEMS = [{ productId:'', qty:1 }];
+let SALE_ITEMS = [{ categoryId:'', productId:'', qty:1 }];
 let SALE_DISCOUNT = 0;
 let SALE_BAGS = [];
 function saleBagPackagingOptions(){
   return DATA.packagingCatalog.filter(p => p.consumptionType === 'venta');
 }
 function saleModalHtml(){
-  SALE_ITEMS = [{ productId:'', qty:1 }];
+  SALE_ITEMS = [{ categoryId:'', productId:'', qty:1 }];
   SALE_DISCOUNT = 0;
   SALE_BAGS = [];
   return renderSaleModalBody();
 }
+function computeSaleItem(it){
+  if(it.categoryId==='__manual__'){
+    return { ...it, isManual:true, name:(it.manualName||'').trim(), price:+it.manualPrice||0, cost:+it.manualCost||0, ownerId: it.manualOwnerId || (DATA.owners[0]?.id||''), product:null };
+  }
+  const p = DATA.products.find(p=>p.id===it.productId);
+  return { ...it, isManual:false, name: p?p.name:'', price:p?p.price:0, cost:p?p.cost:0, ownerId:p?p.ownerId:null, product:p };
+}
 function renderSaleModalBody(){
-  const computed = SALE_ITEMS.map(it => { const p = DATA.products.find(p=>p.id===it.productId); return {...it, product:p, price:p?p.price:0, cost:p?p.cost:0}; });
+  const computed = SALE_ITEMS.map(computeSaleItem);
   const revenue = computed.reduce((a,it)=>a+it.price*it.qty,0);
   const cost = computed.reduce((a,it)=>a+it.cost*it.qty,0);
   const discount = Math.min(SALE_DISCOUNT || 0, revenue);
   const netRevenue = revenue - discount;
   const profit = netRevenue-cost;
-  const insufficient = computed.some(it=>it.product && it.product.trackStock && it.qty>it.product.stock);
+  const insufficient = computed.some(it=>!it.isManual && it.product && it.product.trackStock && it.qty>it.product.stock);
 
   return `
     ${modalHeader('Nueva venta')}
@@ -1878,16 +1929,37 @@ function renderSaleModalBody(){
     <div class="field-label" style="margin:10px 0 6px">Productos</div>
     <div id="sale-items">
       ${SALE_ITEMS.map((row,i) => {
-        const p = DATA.products.find(p=>p.id===row.productId);
+        const isManual = row.categoryId === '__manual__';
+        const productsInCat = (!isManual && row.categoryId) ? DATA.products.filter(p=>p.categoryId===row.categoryId) : [];
+        const p = !isManual ? DATA.products.find(p=>p.id===row.productId) : null;
         const over = p && p.trackStock && row.qty > p.stock;
         return `
-          <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
-            <select class="input sale-item-product" data-idx="${i}" style="flex:2">
-              <option value="">Elegir postre...</option>
-              ${DATA.products.map(pp=>`<option value="${pp.id}" ${pp.id===row.productId?'selected':''}>${esc(pp.name)}${pp.trackStock?` (stock: ${pp.stock})`:''}</option>`).join('')}
-            </select>
-            <input type="number" min="1" class="input sale-item-qty" data-idx="${i}" value="${row.qty}" style="width:70px;border-color:${over?COLORS.frutilla:'var(--line)'}"/>
-            ${SALE_ITEMS.length>1 ? `<button class="btn-icon sale-item-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>` : ''}
+          <div style="margin-bottom:8px;padding:10px;border:1px solid var(--line);border-radius:10px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <select class="input sale-item-cat" data-idx="${i}" style="flex:1.2;min-width:130px">
+                <option value="">Tipo de producto...</option>
+                ${DATA.productCategories.map(c=>`<option value="${c.id}" ${c.id===row.categoryId?'selected':''}>${esc(c.name)}</option>`).join('')}
+                <option value="__manual__" ${isManual?'selected':''}>✏️ Carga manual</option>
+              </select>
+              ${!isManual ? `
+              <select class="input sale-item-product" data-idx="${i}" style="flex:1.6;min-width:150px" ${!row.categoryId?'disabled':''}>
+                <option value="">${row.categoryId ? (productsInCat.length?'Elegir producto...':'Sin productos en esta categoría') : 'Elegí el tipo primero'}</option>
+                ${productsInCat.map(pp=>`<option value="${pp.id}" ${pp.id===row.productId?'selected':''}>${esc(pp.name)}${pp.trackStock?` (stock: ${fmtQty(pp.stock)})`:''}</option>`).join('')}
+              </select>
+              ` : ''}
+              <input type="number" min="1" class="input sale-item-qty" data-idx="${i}" value="${row.qty}" style="width:64px;border-color:${over?COLORS.frutilla:'var(--line)'}"/>
+              ${SALE_ITEMS.length>1 ? `<button class="btn-icon sale-item-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>` : ''}
+            </div>
+            ${isManual ? `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+              <input class="input sale-item-manual-name" data-idx="${i}" value="${esc(row.manualName||'')}" placeholder="Nombre del producto" style="flex:1.4;min-width:130px"/>
+              <input type="number" class="input sale-item-manual-price" data-idx="${i}" value="${row.manualPrice ?? ''}" placeholder="Precio" style="flex:1;min-width:90px"/>
+              <input type="number" class="input sale-item-manual-cost" data-idx="${i}" value="${row.manualCost ?? ''}" placeholder="Costo (opcional)" style="flex:1;min-width:90px"/>
+              <select class="input sale-item-manual-owner" data-idx="${i}" style="flex:1;min-width:100px">
+                ${DATA.owners.map(o=>`<option value="${o.id}" ${row.manualOwnerId===o.id?'selected':''}>${esc(o.name)}</option>`).join('')}
+              </select>
+            </div>
+            ` : ''}
           </div>
         `;
       }).join('')}
@@ -1931,8 +2003,19 @@ function renderSaleModalBody(){
 }
 function attachSaleModalEvents(){
   document.getElementById('modal-cancel').onclick = closeModal;
-  document.getElementById('sale-add-row').onclick = () => { SALE_ITEMS.push({productId:'', qty:1}); refreshSaleModal(); };
+  document.getElementById('sale-add-row').onclick = () => { SALE_ITEMS.push({categoryId:'', productId:'', qty:1}); refreshSaleModal(); };
+  document.querySelectorAll('.sale-item-cat').forEach(el => el.onchange = () => {
+    const idx = +el.dataset.idx;
+    SALE_ITEMS[idx].categoryId = el.value;
+    SALE_ITEMS[idx].productId = '';
+    if(el.value==='__manual__' && !SALE_ITEMS[idx].manualOwnerId) SALE_ITEMS[idx].manualOwnerId = DATA.owners[0]?.id || '';
+    refreshSaleModal();
+  });
   document.querySelectorAll('.sale-item-product').forEach(el => el.onchange = () => { SALE_ITEMS[+el.dataset.idx].productId = el.value; refreshSaleModal(); });
+  document.querySelectorAll('.sale-item-manual-name').forEach(el => el.onchange = () => { SALE_ITEMS[+el.dataset.idx].manualName = el.value; refreshSaleModal(); });
+  document.querySelectorAll('.sale-item-manual-price').forEach(el => el.onchange = () => { SALE_ITEMS[+el.dataset.idx].manualPrice = +el.value || 0; refreshSaleModal(); });
+  document.querySelectorAll('.sale-item-manual-cost').forEach(el => el.onchange = () => { SALE_ITEMS[+el.dataset.idx].manualCost = +el.value || 0; refreshSaleModal(); });
+  document.querySelectorAll('.sale-item-manual-owner').forEach(el => el.onchange = () => { SALE_ITEMS[+el.dataset.idx].manualOwnerId = el.value; refreshSaleModal(); });
   document.querySelectorAll('.sale-item-qty').forEach(el => el.onchange = () => { SALE_ITEMS[+el.dataset.idx].qty = parseInt(el.value)||1; refreshSaleModal(); });
   document.querySelectorAll('.sale-item-remove').forEach(el => el.onclick = () => { SALE_ITEMS.splice(+el.dataset.idx,1); refreshSaleModal(); });
   document.getElementById('sale-save').onclick = saveSale;
@@ -1974,17 +2057,57 @@ function refreshSaleModal(){
   document.getElementById('sale-discount').value = SALE_DISCOUNT || '';
   attachSaleModalEvents();
 }
+/* ---- Cliente + fidelidad: se comparte entre Ventas y la entrega de Encargos ---- */
+async function resolveOrCreateClientForSale(clientName, qtySum){
+  let clientId = null;
+  let rewardMsg = null;
+  if(clientName){
+    const existing = DATA.clients.find(c => c.name.trim().toLowerCase() === clientName.toLowerCase());
+    const threshold = DATA.loyalty?.threshold || 10;
+    if(!existing){
+      const { data, error } = await sb.from('clients').insert({ name: clientName, phone: '', purchase_count: qtySum }).select().single();
+      if(error) throw error;
+      clientId = data.id;
+      const afterMultiples = Math.floor(qtySum / threshold);
+      if(afterMultiples > 0){
+        const nextGoal = (afterMultiples + 1) * threshold;
+        rewardMsg = `🎁 ¡${clientName} llegó a ${qtySum} postres comprados! Le corresponde: ${DATA.loyalty?.reward || 'un premio'}. Próxima meta: ${nextGoal}.`;
+      }
+    } else {
+      clientId = existing.id;
+      const before = existing.purchaseCount || 0;
+      const { data: newCount, error } = await sb.rpc('adjust_purchase_count', { p_client_id: existing.id, p_delta: qtySum });
+      if(error) throw error;
+      const beforeMultiples = Math.floor(before / threshold);
+      const afterMultiples = Math.floor(newCount / threshold);
+      if(afterMultiples > beforeMultiples){
+        const nextGoal = (afterMultiples + 1) * threshold;
+        rewardMsg = `🎁 ¡${clientName} llegó a ${newCount} postres comprados! Le corresponde: ${DATA.loyalty?.reward || 'un premio'}. Próxima meta: ${nextGoal}.`;
+      }
+    }
+  }
+  return { clientId, rewardMsg };
+}
+async function resolveOrCreateClientBasic(clientName){
+  if(!clientName) return null;
+  const existing = DATA.clients.find(c => c.name.trim().toLowerCase() === clientName.toLowerCase());
+  if(existing) return existing.id;
+  const { data, error } = await sb.from('clients').insert({ name: clientName, phone: '', purchase_count: 0 }).select().single();
+  if(error) throw error;
+  return data.id;
+}
 async function saveSale(){
   if(SAVING) return;
   const clientName = document.getElementById('sale-client').value.trim();
   const date = document.getElementById('sale-date').value || todayISO();
   const paymentMethod = document.getElementById('sale-payment').value;
   const discountInput = +document.getElementById('sale-discount').value || 0;
-  const computed = SALE_ITEMS.map(it => { const p = DATA.products.find(p=>p.id===it.productId); return {...it, product:p, price:p?p.price:0, cost:p?p.cost:0}; });
-  const valid = computed.filter(it => it.productId && it.qty>0);
+  const computed = SALE_ITEMS.map(computeSaleItem);
+  const valid = computed.filter(it => it.qty>0 && (it.isManual ? it.name : it.productId));
   if(!valid.length){ alert('Sumá al menos un producto.'); return; }
-  const insufficient = valid.some(it=>it.product && it.product.trackStock && it.qty>it.product.stock);
+  const insufficient = valid.some(it=>!it.isManual && it.product && it.product.trackStock && it.qty>it.product.stock);
   if(insufficient){ alert('No hay stock suficiente para completar esta venta.'); return; }
+  if(valid.some(it=>it.isManual && !it.ownerId)){ alert('Elegí quién vendió cada producto cargado manualmente.'); return; }
 
   const totalRevenue = valid.reduce((a,it)=>a+it.price*it.qty,0);
   const discount = Math.min(discountInput, totalRevenue);
@@ -1992,7 +2115,7 @@ async function saveSale(){
     const itemRevenue = it.price * it.qty;
     const share = totalRevenue > 0 ? (itemRevenue / totalRevenue) * discount : 0;
     const effectivePrice = it.qty > 0 ? (itemRevenue - share) / it.qty : it.price;
-    return { productId: it.productId, productName: it.product.name, ownerId: it.product.ownerId, qty: it.qty, price: effectivePrice, cost: it.cost };
+    return { productId: it.isManual ? null : it.productId, productName: it.name, ownerId: it.ownerId, qty: it.qty, price: effectivePrice, cost: it.cost };
   });
 
   SAVING = true;
@@ -2001,33 +2124,10 @@ async function saveSale(){
 
   let rewardMsg = null;
   try{
-    let clientId = null;
     const qtySum = valid.reduce((a,it)=>a+it.qty,0);
-    if(clientName){
-      const existing = DATA.clients.find(c => c.name.trim().toLowerCase() === clientName.toLowerCase());
-      const threshold = DATA.loyalty?.threshold || 10;
-      if(!existing){
-        const { data, error } = await sb.from('clients').insert({ name: clientName, phone: '', purchase_count: qtySum }).select().single();
-        if(error) throw error;
-        clientId = data.id;
-        const afterMultiples = Math.floor(qtySum / threshold);
-        if(afterMultiples > 0){
-          const nextGoal = (afterMultiples + 1) * threshold;
-          rewardMsg = `🎁 ¡${clientName} llegó a ${qtySum} postres comprados! Le corresponde: ${DATA.loyalty?.reward || 'un premio'}. Próxima meta: ${nextGoal}.`;
-        }
-      } else {
-        clientId = existing.id;
-        const before = existing.purchaseCount || 0;
-        const { data: newCount, error } = await sb.rpc('adjust_purchase_count', { p_client_id: existing.id, p_delta: qtySum });
-        if(error) throw error;
-        const beforeMultiples = Math.floor(before / threshold);
-        const afterMultiples = Math.floor(newCount / threshold);
-        if(afterMultiples > beforeMultiples){
-          const nextGoal = (afterMultiples + 1) * threshold;
-          rewardMsg = `🎁 ¡${clientName} llegó a ${newCount} postres comprados! Le corresponde: ${DATA.loyalty?.reward || 'un premio'}. Próxima meta: ${nextGoal}.`;
-        }
-      }
-    }
+    const clientResult = await resolveOrCreateClientForSale(clientName, qtySum);
+    const clientId = clientResult.clientId;
+    rewardMsg = clientResult.rewardMsg;
 
     const { data: saleRow, error: saleErr } = await sb.from('sales').insert({ date, client_id: clientId, payment_method: paymentMethod, discount }).select().single();
     if(saleErr) throw saleErr;
@@ -2037,7 +2137,7 @@ async function saveSale(){
     if(itemsErr) throw itemsErr;
 
     for(const it of valid){
-      if(it.product.trackStock){
+      if(!it.isManual && it.product && it.product.trackStock){
         await sb.rpc('adjust_stock', { p_product_id: it.productId, p_delta: -it.qty });
       }
     }
