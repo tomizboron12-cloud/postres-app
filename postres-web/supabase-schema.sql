@@ -296,3 +296,58 @@ returns numeric as $$
   where id = p_packaging_id
   returning current_stock;
 $$ language sql;
+
+-- ============================================================
+-- Categorías de productos (Postres, Tortas, Shots, etc.) y Encargos
+-- (pedidos a futuro con seña / resto / recordatorio).
+-- ============================================================
+create table if not exists product_categories (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+alter table product_categories enable row level security;
+create policy "anon full access" on product_categories for all using (true) with check (true);
+alter publication supabase_realtime add table product_categories;
+
+insert into product_categories (name, sort_order)
+select 'Postres', 0
+where not exists (select 1 from product_categories where name='Postres');
+
+alter table products add column if not exists category_id uuid references product_categories(id) on delete set null;
+update products set category_id = (select id from product_categories where name='Postres' limit 1)
+where category_id is null;
+
+create table if not exists custom_orders (
+  id uuid primary key default gen_random_uuid(),
+  client_name text not null,
+  client_id uuid references clients(id) on delete set null,
+  order_date date not null default current_date,
+  due_date date not null,
+  due_time text,
+  total_amount numeric not null default 0,
+  deposit_amount numeric not null default 0,
+  deposit_method text default '',
+  remaining_method text default '',
+  remaining_paid boolean not null default false,
+  status text not null default 'pendiente',
+  notes text default '',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists custom_order_items (
+  id uuid primary key default gen_random_uuid(),
+  custom_order_id uuid not null references custom_orders(id) on delete cascade,
+  category_id uuid references product_categories(id) on delete set null,
+  category_name text not null default '',
+  flavor text default '',
+  qty numeric not null default 1
+);
+
+alter table custom_orders enable row level security;
+alter table custom_order_items enable row level security;
+create policy "anon full access" on custom_orders for all using (true) with check (true);
+create policy "anon full access" on custom_order_items for all using (true) with check (true);
+alter publication supabase_realtime add table custom_orders;
+alter publication supabase_realtime add table custom_order_items;

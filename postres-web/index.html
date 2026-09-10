@@ -132,6 +132,7 @@ const ICONS = {
   edit: ic('<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>'),
   cake: ic('<path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8"/><path d="M4 16s.5-1 2-1 1.5 1 3 1 1.5-1 3-1 1.5 1 3 1 2-1 2-1"/><path d="M12 11V7"/><path d="M9 7c0-1 1-1.5 1-2.5S9 3 9 3M12 7c0-1 1-1.5 1-2.5S12 3 12 3M15 7c0-1 1-1.5 1-2.5S15 3 15 3"/>'),
   logout: ic('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'),
+  check: ic('<polyline points="20 6 9 17 4 12"/>'),
 };
 
 /* ===================== HELPERS ===================== */
@@ -144,7 +145,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&
 const CURRENT_USER_KEY = 'postres-current-user';
 
 /* ===================== ESTADO GLOBAL ===================== */
-let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[], shoppingListManual:[], workInProgress:[] };
+let DATA = { owners:[{id:'ella',name:'Sofi'},{id:'mama',name:'Mamá'}], products:[], clients:[], sales:[], purchases:[], loyalty:{threshold:10,reward:'1 postre gratis'}, ingredients:[], recipes:[], packagingCatalog:[], costProducts:[], shoppingListManual:[], workInProgress:[], productCategories:[], customOrders:[] };
 let TAB = 'dashboard';
 let MODAL = null;
 let SEARCH_Q = '';
@@ -153,6 +154,8 @@ let SAVING = false;
 let DASHBOARD_EXPANDED = false;
 let DASH_RANGE = { preset: 'today', start: null, end: null };
 let SALES_RANGE = { preset: 'all', start: null, end: null };
+let PRODUCT_CATEGORY_FILTER = 'all';
+let ORDERS_SHOW_DELIVERED = false;
 
 function ownerName(id){ return (DATA.owners.find(o=>o.id===id)||{}).name || id; }
 function clientMap(){ return Object.fromEntries(DATA.clients.map(c=>[c.id,c])); }
@@ -161,7 +164,7 @@ function currentUser(){ return localStorage.getItem(CURRENT_USER_KEY); }
 
 /* ===================== CARGA DE DATOS (SUPABASE) ===================== */
 async function loadAll(){
-  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR, shoppingR, wipR] = await Promise.all([
+  const [ownersR, productsR, clientsR, salesR, purchasesR, loyaltyR, ingredientsR, recipesR, packagingR, costProductsR, shoppingR, wipR, categoriesR, ordersR] = await Promise.all([
     sb.from('owners').select('*').order('id'),
     sb.from('products').select('*').order('created_at'),
     sb.from('clients').select('*').order('name'),
@@ -174,9 +177,11 @@ async function loadAll(){
     sb.from('cost_products').select('*, cost_product_ingredients(*), cost_product_recipes(*), cost_product_packaging(*)').order('name'),
     sb.from('shopping_list_manual').select('*').order('created_at'),
     sb.from('work_in_progress').select('*').order('created_at'),
+    sb.from('product_categories').select('*').order('sort_order').order('name'),
+    sb.from('custom_orders').select('*, custom_order_items(*)').order('due_date'),
   ]);
   if(ownersR.data) DATA.owners = ownersR.data.map(o=>({id:o.id, name:o.name}));
-  if(productsR.data) DATA.products = productsR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, price:+p.price, ownerId:p.owner_id, trackStock:p.track_stock, stock:p.stock, lowStockAlert:p.low_stock_alert, costProductId:p.cost_product_id}));
+  if(productsR.data) DATA.products = productsR.data.map(p=>({id:p.id, name:p.name, cost:+p.cost, price:+p.price, ownerId:p.owner_id, trackStock:p.track_stock, stock:p.stock, lowStockAlert:p.low_stock_alert, costProductId:p.cost_product_id, categoryId:p.category_id||null}));
   if(clientsR.data) DATA.clients = clientsR.data.map(c=>({id:c.id, name:c.name, phone:c.phone||'', purchaseCount:c.purchase_count||0}));
   if(salesR.data) DATA.sales = salesR.data.map(s=>({
     id:s.id, date:s.date, clientId:s.client_id, paymentMethod:s.payment_method, discount:+s.discount,
@@ -199,6 +204,13 @@ async function loadAll(){
   }));
   if(shoppingR.data) DATA.shoppingListManual = shoppingR.data.map(i=>({id:i.id, name:i.name, checked:i.checked}));
   if(wipR.data) DATA.workInProgress = wipR.data.map(w=>({id:w.id, productId:w.product_id, qty:+w.qty, date:w.date, usedIngredientIds:w.used_ingredient_ids||[], usedRecipeIds:w.used_recipe_ids||[]}));
+  if(categoriesR.data) DATA.productCategories = categoriesR.data.map(c=>({id:c.id, name:c.name, sortOrder:c.sort_order||0}));
+  if(ordersR.data) DATA.customOrders = ordersR.data.map(o=>({
+    id:o.id, clientName:o.client_name, clientId:o.client_id, orderDate:o.order_date, dueDate:o.due_date, dueTime:o.due_time||'',
+    totalAmount:+o.total_amount, depositAmount:+o.deposit_amount, depositMethod:o.deposit_method||'', remainingMethod:o.remaining_method||'',
+    remainingPaid:!!o.remaining_paid, status:o.status||'pendiente', notes:o.notes||'',
+    items:(o.custom_order_items||[]).map(it=>({id:it.id, categoryId:it.category_id, categoryName:it.category_name||'', flavor:it.flavor||'', qty:+it.qty}))
+  }));
   LOADED = true;
 }
 
@@ -211,7 +223,7 @@ function subscribeRealtime(){
   const channel = sb.channel('postres-sync');
   ['products','clients','sales','sale_items','purchases','loyalty_config','owners',
    'ingredients','recipes','recipe_items','packaging_catalog','cost_products','cost_product_ingredients','cost_product_recipes','cost_product_packaging',
-   'shopping_list_manual','work_in_progress','sale_bags'].forEach(table => {
+   'shopping_list_manual','work_in_progress','sale_bags','product_categories','custom_orders','custom_order_items'].forEach(table => {
     channel.on('postgres_changes', {event:'*', schema:'public', table}, scheduleReload);
   });
   channel.subscribe();
@@ -407,7 +419,8 @@ function packagingConsumptionForCostProduct(cp, multiplier){
 const NAV = [
   {id:'dashboard', label:'Resumen', icon:ICONS.trending},
   {id:'sales', label:'Ventas', icon:ICONS.bag},
-  {id:'products', label:'Postres', icon:ICONS.cake},
+  {id:'products', label:'Productos', icon:ICONS.cake},
+  {id:'orders', label:'Encargos', icon:ICONS.calendar},
   {id:'clients', label:'Clientes', icon:ICONS.users},
   {id:'purchases', label:'Gastos', icon:ICONS.dollar},
   {id:'ingredients', label:'Ingredientes', icon:ICONS.package},
@@ -430,8 +443,11 @@ function render(){
   }
 
   const lowStock = DATA.products.filter(p=>p.trackStock && p.stock<=p.lowStockAlert);
+  const dueOrdersCount = ordersDueSoon().length;
 
   const prevNavScroll = document.querySelector('.mobile-navbar')?.scrollLeft || 0;
+
+  checkOrderNotifications();
 
   root.innerHTML = `
     <div class="app">
@@ -444,6 +460,7 @@ function render(){
           <button class="${TAB===n.id?'active':''}" data-nav="${n.id}">
             ${n.icon}<span>${n.label}</span>
             ${n.id==='products' && lowStock.length>0 ? `<span class="dot"></span>` : ''}
+            ${n.id==='orders' && dueOrdersCount>0 ? `<span class="dot"></span>` : ''}
           </button>
         `).join('')}
       </div>
@@ -453,6 +470,7 @@ function render(){
           <button class="navbtn ${TAB===n.id?'active':''}" data-nav="${n.id}">
             ${n.icon} ${n.label}
             ${n.id==='products' && lowStock.length>0 ? `<span class="badge">${lowStock.length}</span>` : ''}
+            ${n.id==='orders' && dueOrdersCount>0 ? `<span class="badge">${dueOrdersCount}</span>` : ''}
           </button>
         `).join('')}
         <div class="sidebar-foot">
@@ -478,6 +496,7 @@ function render(){
   if(TAB==='dashboard') main.innerHTML = renderDashboard();
   if(TAB==='sales') main.innerHTML = renderSales();
   if(TAB==='products') main.innerHTML = renderProducts();
+  if(TAB==='orders') main.innerHTML = renderOrders();
   if(TAB==='clients') main.innerHTML = renderClients();
   if(TAB==='purchases') main.innerHTML = renderPurchases();
   if(TAB==='ingredients') main.innerHTML = renderIngredients();
@@ -560,6 +579,20 @@ function renderDashboard(){
         ${lowStock.map(p=>`<div style="font-size:14px;display:flex;justify-content:space-between;padding:4px 0"><span>${esc(p.name)}</span><span class="num" style="font-weight:700">${p.stock} unidades</span></div>`).join('')}
       </div>
     ` : ''}
+
+    ${(() => {
+      const upcoming = (DATA.customOrders||[]).filter(o=>o.status==='pendiente').sort((a,b)=>a.dueDate.localeCompare(b.dueDate)).slice(0,5);
+      if(upcoming.length===0) return '';
+      return `
+        <div class="card" style="margin-bottom:18px">
+          <div style="display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:8px">${ICONS.calendar} Próximos encargos</div>
+          ${upcoming.map(o => {
+            const due = orderDueLabel(o);
+            return `<div style="font-size:14px;display:flex;justify-content:space-between;padding:4px 0"><span>${esc(o.clientName)}</span><span class="num" style="font-weight:700;color:${due.urgent?COLORS.frutillaDark:'inherit'}">${o.dueDate} · ${due.text}</span></div>`;
+          }).join('')}
+        </div>
+      `;
+    })()}
 
     ${renderExpenseSummary(bounds)}
 
@@ -775,36 +808,52 @@ async function removeSale(id){
 
 /* ===================== PRODUCTOS ===================== */
 function renderProducts(){
+  const cats = DATA.productCategories || [];
+  const filtered = PRODUCT_CATEGORY_FILTER==='all' ? DATA.products : DATA.products.filter(p=>p.categoryId===PRODUCT_CATEGORY_FILTER);
   const actionButtons = `
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-ghost" data-open-modal="stockMovement">${ICONS.package} Cargar stock</button>
-      <button class="btn btn-primary" data-open-modal="newProduct">${ICONS.plus} Nuevo postre</button>
+      <button class="btn btn-primary" data-open-modal="newProduct">${ICONS.plus} Nuevo producto</button>
+    </div>
+  `;
+  const categoryPills = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+      <button class="btn ${PRODUCT_CATEGORY_FILTER==='all'?'btn-dark':'btn-ghost'} cat-filter-btn" data-cat="all" style="padding:6px 12px;font-size:13px">Todos</button>
+      ${cats.map(c=>`<button class="btn ${PRODUCT_CATEGORY_FILTER===c.id?'btn-dark':'btn-ghost'} cat-filter-btn" data-cat="${c.id}" style="padding:6px 12px;font-size:13px">${esc(c.name)}</button>`).join('')}
+      <button class="btn btn-ghost" data-open-modal="manageCategories" style="padding:6px 12px;font-size:13px">${ICONS.plus} Categoría</button>
     </div>
   `;
   if(DATA.products.length===0){
     return `
       <div class="header-row">
-        <div><div class="header-title serif">Productos</div><div class="header-sub">Cada postre con su costo, precio, dueño y stock</div></div>
+        <div><div class="header-title serif">Productos</div><div class="header-sub">Cada producto con su costo, precio, dueño, categoría y stock</div></div>
         ${actionButtons}
       </div>
-      <div class="card"><div class="empty">Todavía no cargaste postres.</div></div>
+      ${categoryPills}
+      <div class="card"><div class="empty">Todavía no cargaste productos.</div></div>
     `;
   }
   return `
     <div class="header-row">
-      <div><div class="header-title serif">Productos</div><div class="header-sub">Cada postre con su costo, precio, dueño y stock</div></div>
+      <div><div class="header-title serif">Productos</div><div class="header-sub">Cada producto con su costo, precio, dueño, categoría y stock</div></div>
       ${actionButtons}
     </div>
+    ${categoryPills}
+    ${filtered.length===0 ? `<div class="card"><div class="empty">No hay productos en esta categoría.</div></div>` : `
     <div class="grid-cards">
-      ${DATA.products.map(p => {
+      ${filtered.map(p => {
         const margin = p.price>0 ? Math.round(((p.price-p.cost)/p.price)*100) : 0;
         const ownerColor = p.ownerId==='mama' ? COLORS.dulce : COLORS.frutilla;
+        const cat = cats.find(c=>c.id===p.categoryId);
         return `
           <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:flex-start">
               <div>
                 <div style="font-weight:700;font-size:16px">${esc(p.name)}</div>
-                <span class="pill" style="background:${ownerColor}1c;color:${ownerColor}">${esc(ownerName(p.ownerId))}</span>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+                  <span class="pill" style="background:${ownerColor}1c;color:${ownerColor}">${esc(ownerName(p.ownerId))}</span>
+                  ${cat ? `<span class="pill" style="background:${COLORS.chocoSoft}1c;color:${COLORS.chocoSoft}">${esc(cat.name)}</span>` : ''}
+                </div>
               </div>
               <div style="display:flex;gap:4px">
                 <button class="btn-icon" data-edit-product="${p.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
@@ -822,6 +871,7 @@ function renderProducts(){
         `;
       }).join('')}
     </div>
+    `}
 
     ${renderWipSection()}
   `;
@@ -968,10 +1018,369 @@ function attachFinishWipModalEvents(w){
 }
 
 async function removeProduct(id){
-  if(!confirm('¿Eliminar este postre? No afecta ventas ya cargadas.')) return;
+  if(!confirm('¿Eliminar este producto? No afecta ventas ya cargadas.')) return;
   const { error } = await sb.from('products').delete().eq('id', id);
   if(error){ alert('Error al eliminar: ' + error.message); return; }
   await loadAll(); render();
+}
+
+/* ---- Categorías de productos ---- */
+function categoryManagerModalHtml(){
+  return `
+    ${modalHeader('Categorías de productos')}
+    <div style="font-size:12.5px;color:var(--chocoSoft);margin-bottom:10px">Ej: Postres, Tortas, Shots, Alfajores...</div>
+    <div id="cat-list" class="stack" style="margin-bottom:14px">
+      ${(DATA.productCategories||[]).map(c => `
+        <div class="row" style="align-items:center">
+          <span class="row-label">${esc(c.name)}</span>
+          <button class="btn-icon cat-remove" data-id="${c.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+        </div>
+      `).join('') || `<div class="empty">Todavía no hay categorías.</div>`}
+    </div>
+    <div style="display:flex;gap:8px">
+      <input class="input" id="cat-new-name" placeholder="Nueva categoría, ej: Tortas"/>
+      <button class="btn btn-primary" id="cat-add">${ICONS.plus}</button>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cerrar</button>
+    </div>
+  `;
+}
+function attachCategoryManagerModalEvents(){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('cat-add').onclick = async () => {
+    const name = document.getElementById('cat-new-name').value.trim();
+    if(!name) return;
+    const { error } = await sb.from('product_categories').insert({ name, sort_order: (DATA.productCategories||[]).length });
+    if(error){ alert('Error al agregar: ' + error.message); return; }
+    await loadAll();
+    renderModal();
+  };
+  document.querySelectorAll('.cat-remove').forEach(el => el.onclick = async () => {
+    if(!confirm('¿Eliminar esta categoría? Los productos que la tenían quedan sin categoría (no se borran).')) return;
+    const { error } = await sb.from('product_categories').delete().eq('id', el.dataset.id);
+    if(error){ alert('Error al eliminar: ' + error.message); return; }
+    await loadAll();
+    renderModal();
+  });
+}
+
+/* ===================== ENCARGOS ===================== */
+function orderRemaining(o){ return o.remainingPaid ? 0 : Math.max(0, (o.totalAmount||0) - (o.depositAmount||0)); }
+function orderDueLabel(o){
+  const today = todayISO();
+  const diffDays = Math.round((new Date(o.dueDate+'T00:00:00') - new Date(today+'T00:00:00')) / 86400000);
+  if(diffDays === 0) return { text:'Hoy', urgent:true };
+  if(diffDays < 0) return { text:`Atrasado ${Math.abs(diffDays)} día${Math.abs(diffDays)>1?'s':''}`, urgent:true };
+  if(diffDays === 1) return { text:'Mañana', urgent:false };
+  return { text:`En ${diffDays} días`, urgent:false };
+}
+function ordersDueSoon(){
+  const today = todayISO();
+  return (DATA.customOrders||[]).filter(o => o.status==='pendiente' && o.dueDate<=today);
+}
+const NOTIFIED_ORDERS_KEY = 'postres-notified-orders';
+function checkOrderNotifications(){
+  if(typeof Notification==='undefined' || Notification.permission!=='granted') return;
+  const today = todayISO();
+  let notified = {};
+  try{ notified = JSON.parse(localStorage.getItem(NOTIFIED_ORDERS_KEY)||'{}'); }catch(e){}
+  const due = ordersDueSoon();
+  let changed = false;
+  for(const o of due){
+    if(notified[o.id]===today) continue;
+    const overdue = o.dueDate < today;
+    try{
+      new Notification(overdue ? '⚠ Encargo atrasado' : '🎂 Encargo para hoy', {
+        body: `${o.clientName} — ${(o.items||[]).map(it=>`${fmtQty(it.qty)} ${it.categoryName||''}${it.flavor?` (${it.flavor})`:''}`).join(', ')}`,
+        tag: 'order-'+o.id,
+      });
+    }catch(e){}
+    notified[o.id] = today;
+    changed = true;
+  }
+  if(changed) localStorage.setItem(NOTIFIED_ORDERS_KEY, JSON.stringify(notified));
+}
+function renderOrders(){
+  const all = DATA.customOrders || [];
+  const pending = all.filter(o=>o.status==='pendiente').sort((a,b)=>a.dueDate.localeCompare(b.dueDate));
+  const delivered = all.filter(o=>o.status!=='pendiente').sort((a,b)=>b.dueDate.localeCompare(a.dueDate));
+  const dueSoon = ordersDueSoon();
+  const notifPermission = typeof Notification!=='undefined' ? Notification.permission : 'unsupported';
+
+  const renderOrderCard = (o) => {
+    const due = orderDueLabel(o);
+    const remaining = orderRemaining(o);
+    const alertCard = due.urgent && o.status==='pendiente';
+    return `
+      <div class="card" style="${alertCard ? `border-color:${COLORS.frutilla};background:#FFF4F1` : ''}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <div>
+            <div style="font-weight:700;font-size:16px">${esc(o.clientName)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+              <span class="pill" style="background:${due.urgent?COLORS.frutillaDark:COLORS.chocoSoft}1c;color:${due.urgent?COLORS.frutillaDark:COLORS.chocoSoft}">${o.dueDate}${o.dueTime?` ${o.dueTime}`:''} · ${due.text}</span>
+              ${o.status!=='pendiente' ? `<span class="pill" style="background:${COLORS.menta}1c;color:${COLORS.menta}">Entregado</span>` : ''}
+            </div>
+          </div>
+          <div style="display:flex;gap:4px">
+            <button class="btn-icon" data-edit-order="${o.id}">${ICONS.edit.replace('currentColor', COLORS.chocoSoft)}</button>
+            <button class="btn-icon" data-remove-order="${o.id}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:13.5px">
+          ${(o.items||[]).map(it => `<div class="row"><span class="row-label">${esc(it.categoryName||'Producto')}${it.flavor?` — ${esc(it.flavor)}`:''}</span><span class="row-value">× ${fmtQty(it.qty)}</span></div>`).join('') || `<div class="empty" style="padding:6px 0">Sin items</div>`}
+        </div>
+        <div class="num" style="margin-top:10px;font-size:13.5px">
+          <div class="row"><span class="row-label">Total</span><span class="row-value bold">${money(o.totalAmount)}</span></div>
+          <div class="row"><span class="row-label">Seña${o.depositMethod?` (${o.depositMethod})`:''}</span><span class="row-value">${money(o.depositAmount)}</span></div>
+          <div class="row"><span class="row-label">Falta abonar</span><span class="row-value" style="color:${remaining>0?COLORS.frutillaDark:COLORS.menta}">${money(remaining)}</span></div>
+          ${o.remainingMethod ? `<div class="row"><span class="row-label">Resto por</span><span class="row-value">${esc(o.remainingMethod)}${o.remainingPaid?' (cobrado)':''}</span></div>` : ''}
+        </div>
+        ${o.notes ? `<div style="font-size:12.5px;color:var(--chocoSoft);margin-top:8px">📝 ${esc(o.notes)}</div>` : ''}
+        ${o.status==='pendiente' ? `
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+          ${!o.remainingPaid && remaining>0 ? `<button class="btn btn-ghost" data-mark-paid="${o.id}" style="padding:6px 10px;font-size:12.5px">${ICONS.check} Resto cobrado</button>` : ''}
+          <button class="btn btn-ghost" data-mark-delivered="${o.id}" style="padding:6px 10px;font-size:12.5px">${ICONS.check} Marcar entregado</button>
+        </div>
+        ` : ''}
+      </div>
+    `;
+  };
+
+  return `
+    <div class="header-row">
+      <div><div class="header-title serif">Encargos</div><div class="header-sub">Lo que le encargaron, para cuándo, y cuánto falta cobrar</div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${notifPermission==='default' ? `<button class="btn btn-ghost" id="orders-enable-notif">🔔 Activar recordatorios</button>` : ''}
+        <button class="btn btn-primary" data-open-modal="newOrder">${ICONS.plus} Nuevo encargo</button>
+      </div>
+    </div>
+
+    ${dueSoon.length>0 ? `
+      <div class="card" style="margin-bottom:18px;border-color:${COLORS.frutilla};background:#FFF4F1">
+        <div style="display:flex;align-items:center;gap:8px;font-weight:700;color:${COLORS.frutillaDark};margin-bottom:8px">${ICONS.alert} Encargos para hoy o atrasados</div>
+        ${dueSoon.map(o=>`<div style="font-size:14px;display:flex;justify-content:space-between;padding:4px 0"><span>${esc(o.clientName)}</span><span class="num" style="font-weight:700">${o.dueDate}</span></div>`).join('')}
+      </div>
+    ` : ''}
+
+    ${pending.length===0 ? `<div class="card"><div class="empty">No hay encargos pendientes.</div></div>` : `
+      <div class="stack">${pending.map(renderOrderCard).join('')}</div>
+    `}
+
+    ${delivered.length>0 ? `
+      <button class="btn btn-ghost" id="orders-toggle-delivered" style="margin-top:18px">${ORDERS_SHOW_DELIVERED?'▲ Ocultar entregados':`▼ Ver entregados (${delivered.length})`}</button>
+      ${ORDERS_SHOW_DELIVERED ? `<div class="stack" style="margin-top:12px">${delivered.map(renderOrderCard).join('')}</div>` : ''}
+    ` : ''}
+  `;
+}
+async function removeOrder(id){
+  if(!confirm('¿Eliminar este encargo?')) return;
+  const { error } = await sb.from('custom_orders').delete().eq('id', id);
+  if(error){ alert('Error al eliminar: ' + error.message); return; }
+  await loadAll(); render();
+}
+async function markOrderDelivered(id){
+  const { error } = await sb.from('custom_orders').update({ status:'entregado' }).eq('id', id);
+  if(error){ alert('Error: ' + error.message); return; }
+  await loadAll(); render();
+}
+async function markOrderRemainingPaid(id){
+  const o = DATA.customOrders.find(o=>o.id===id);
+  const method = prompt('¿Con qué medio de pago cobró el resto? (Ej: Transferencia, Efectivo)', o?.remainingMethod || '');
+  if(method===null) return;
+  const { error } = await sb.from('custom_orders').update({ remaining_paid:true, remaining_method: method }).eq('id', id);
+  if(error){ alert('Error: ' + error.message); return; }
+  await loadAll(); render();
+}
+
+/* ---- Nuevo encargo ---- */
+let ORDER_ITEMS = [];
+let ORDER_TOTAL = 0;
+let ORDER_DEPOSIT = 0;
+function orderModalHtml(editing){
+  ORDER_ITEMS = editing ? structuredClone(editing.items||[]).map(it=>({categoryId:it.categoryId||'', flavor:it.flavor||'', qty:it.qty||1})) : [{ categoryId:'', flavor:'', qty:1 }];
+  ORDER_TOTAL = editing?.totalAmount || 0;
+  ORDER_DEPOSIT = editing?.depositAmount || 0;
+  return renderOrderModalBody(editing);
+}
+function renderOrderModalBody(editing){
+  const cats = DATA.productCategories || [];
+  const remainingPreview = Math.max(0, ORDER_TOTAL - ORDER_DEPOSIT);
+  return `
+    ${modalHeader(editing?'Editar encargo':'Nuevo encargo')}
+    <div class="field" style="position:relative">
+      <div class="field-label">Cliente</div>
+      <input class="input" id="ord-client" autocomplete="off" value="${esc(editing?.clientName||'')}" placeholder="Ej: Ana Pérez"/>
+      <div id="ord-client-suggestions" style="display:none;position:absolute;left:0;right:0;top:100%;margin-top:2px;background:#fff;border:1px solid var(--line);border-radius:10px;max-height:180px;overflow-y:auto;z-index:20;box-shadow:0 6px 18px rgba(43,27,20,0.12)"></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Fecha del pedido</div><input type="date" class="input" id="ord-orderdate" value="${editing?.orderDate || todayISO()}"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Para cuándo es</div><input type="date" class="input" id="ord-duedate" value="${editing?.dueDate || ''}"/></div>
+    </div>
+    <div class="field"><div class="field-label">Hora de entrega (opcional)</div><input class="input" id="ord-duetime" value="${esc(editing?.dueTime||'')}" placeholder="Ej: 18:00"/></div>
+
+    <div class="field-label" style="margin:10px 0 6px">Qué encargó</div>
+    <div id="ord-items">
+      ${ORDER_ITEMS.map((row,i) => `
+        <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+          <select class="input ord-item-cat" data-idx="${i}" style="flex:1.3;min-width:120px">
+            <option value="">Tipo de producto...</option>
+            ${cats.map(c=>`<option value="${c.id}" ${c.id===row.categoryId?'selected':''}>${esc(c.name)}</option>`).join('')}
+          </select>
+          <input class="input ord-item-flavor" data-idx="${i}" value="${esc(row.flavor||'')}" placeholder="Sabor / variante" style="flex:1.3;min-width:110px"/>
+          <input type="number" min="1" step="any" class="input ord-item-qty" data-idx="${i}" value="${row.qty}" style="width:64px" placeholder="cant."/>
+          ${ORDER_ITEMS.length>1 ? `<button class="btn-icon ord-item-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>` : ''}
+        </div>
+      `).join('')}
+    </div>
+    <button class="btn btn-ghost" id="ord-add-row" style="margin-bottom:14px">${ICONS.plus} Agregar producto</button>
+
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Total</div><input type="number" min="0" class="input" id="ord-total" value="${ORDER_TOTAL || ''}"/></div>
+      <div style="flex:1" class="field"><div class="field-label">Seña</div><input type="number" min="0" class="input" id="ord-deposit" value="${ORDER_DEPOSIT || ''}"/></div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <div style="flex:1" class="field"><div class="field-label">Medio de pago de la seña</div>
+        <select class="input" id="ord-deposit-method">
+          <option value="">—</option>
+          <option ${editing?.depositMethod==='Transferencia'?'selected':''}>Transferencia</option>
+          <option ${editing?.depositMethod==='Efectivo'?'selected':''}>Efectivo</option>
+          <option ${editing?.depositMethod==='Mercado Pago'?'selected':''}>Mercado Pago</option>
+          <option ${editing?.depositMethod==='Otro'?'selected':''}>Otro</option>
+        </select>
+      </div>
+      <div style="flex:1" class="field"><div class="field-label">Medio de pago del resto</div>
+        <select class="input" id="ord-remaining-method">
+          <option value="">—</option>
+          <option ${editing?.remainingMethod==='Transferencia'?'selected':''}>Transferencia</option>
+          <option ${editing?.remainingMethod==='Efectivo'?'selected':''}>Efectivo</option>
+          <option ${editing?.remainingMethod==='Mercado Pago'?'selected':''}>Mercado Pago</option>
+          <option ${editing?.remainingMethod==='Otro'?'selected':''}>Otro</option>
+        </select>
+      </div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:14px;font-weight:600">
+      <input type="checkbox" id="ord-remaining-paid" ${editing?.remainingPaid?'checked':''}/> Ya cobró el resto
+    </label>
+    <div class="field"><div class="field-label">Notas (opcional)</div><textarea class="input" id="ord-notes" rows="2" placeholder="Ej: sin nueces, retira ella misma...">${esc(editing?.notes||'')}</textarea></div>
+
+    <div class="card" style="background:var(--cream);border:none">
+      <div class="num row" style="font-size:16px;font-weight:800"><span>Falta abonar</span><span style="color:${remainingPreview>0?COLORS.frutillaDark:COLORS.menta}">${money(remainingPreview)}</span></div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-ghost" id="modal-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="ord-save" ${SAVING?'disabled':''}>${SAVING?'Guardando...':'Guardar encargo'}</button>
+    </div>
+  `;
+}
+function attachOrderModalEvents(editing){
+  document.getElementById('modal-cancel').onclick = closeModal;
+  document.getElementById('ord-add-row').onclick = () => { ORDER_ITEMS.push({categoryId:'', flavor:'', qty:1}); refreshOrderModal(editing); };
+  document.querySelectorAll('.ord-item-cat').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].categoryId = el.value; refreshOrderModal(editing); });
+  document.querySelectorAll('.ord-item-flavor').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].flavor = el.value; refreshOrderModal(editing); });
+  document.querySelectorAll('.ord-item-qty').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].qty = +el.value || 1; refreshOrderModal(editing); });
+  document.querySelectorAll('.ord-item-remove').forEach(el => el.onclick = () => { ORDER_ITEMS.splice(+el.dataset.idx,1); refreshOrderModal(editing); });
+  document.getElementById('ord-total').onchange = () => { ORDER_TOTAL = +document.getElementById('ord-total').value || 0; refreshOrderModal(editing); };
+  document.getElementById('ord-deposit').onchange = () => { ORDER_DEPOSIT = +document.getElementById('ord-deposit').value || 0; refreshOrderModal(editing); };
+  document.getElementById('ord-save').onclick = () => saveOrder(editing);
+
+  const clientInput = document.getElementById('ord-client');
+  const suggBox = document.getElementById('ord-client-suggestions');
+  if(clientInput && suggBox){
+    const showSuggestions = () => {
+      const q = clientInput.value.trim().toLowerCase();
+      const matches = DATA.clients.filter(c => !q || c.name.toLowerCase().includes(q)).slice(0,8);
+      if(matches.length===0){ suggBox.style.display = 'none'; return; }
+      suggBox.innerHTML = matches.map(c => `<div class="client-suggestion-item" data-client-name="${esc(c.name)}" style="padding:10px 12px;font-size:14px;cursor:pointer;border-bottom:1px solid var(--line)">${esc(c.name)}</div>`).join('');
+      suggBox.style.display = 'block';
+      suggBox.querySelectorAll('.client-suggestion-item').forEach(el => {
+        el.onmousedown = (e) => { e.preventDefault(); clientInput.value = el.dataset.clientName; suggBox.style.display = 'none'; };
+      });
+    };
+    clientInput.oninput = showSuggestions;
+    clientInput.onfocus = showSuggestions;
+    clientInput.onblur = () => { setTimeout(() => { suggBox.style.display = 'none'; }, 120); };
+  }
+}
+function refreshOrderModal(editing){
+  const client = document.getElementById('ord-client')?.value || '';
+  const orderDate = document.getElementById('ord-orderdate')?.value || todayISO();
+  const dueDate = document.getElementById('ord-duedate')?.value || '';
+  const dueTime = document.getElementById('ord-duetime')?.value || '';
+  const depositMethod = document.getElementById('ord-deposit-method')?.value || '';
+  const remainingMethod = document.getElementById('ord-remaining-method')?.value || '';
+  const remainingPaid = document.getElementById('ord-remaining-paid')?.checked || false;
+  const notes = document.getElementById('ord-notes')?.value || '';
+  document.getElementById('modal-box').innerHTML = renderOrderModalBody(editing);
+  const closeBtn = document.getElementById('modal-close'); if(closeBtn) closeBtn.onclick = closeModal;
+  document.getElementById('ord-client').value = client;
+  document.getElementById('ord-orderdate').value = orderDate;
+  document.getElementById('ord-duedate').value = dueDate;
+  document.getElementById('ord-duetime').value = dueTime;
+  document.getElementById('ord-deposit-method').value = depositMethod;
+  document.getElementById('ord-remaining-method').value = remainingMethod;
+  document.getElementById('ord-remaining-paid').checked = remainingPaid;
+  document.getElementById('ord-notes').value = notes;
+  attachOrderModalEvents(editing);
+}
+async function saveOrder(editing){
+  if(SAVING) return;
+  const clientName = document.getElementById('ord-client').value.trim();
+  const orderDate = document.getElementById('ord-orderdate').value || todayISO();
+  const dueDate = document.getElementById('ord-duedate').value;
+  const dueTime = document.getElementById('ord-duetime').value.trim();
+  const total = +document.getElementById('ord-total').value || 0;
+  const deposit = +document.getElementById('ord-deposit').value || 0;
+  const depositMethod = document.getElementById('ord-deposit-method').value;
+  const remainingMethod = document.getElementById('ord-remaining-method').value;
+  const remainingPaid = document.getElementById('ord-remaining-paid').checked;
+  const notes = document.getElementById('ord-notes').value;
+  const cats = DATA.productCategories || [];
+  const items = ORDER_ITEMS.filter(it => it.qty>0 && (it.categoryId || it.flavor));
+
+  if(!clientName){ alert('Poné el nombre del cliente.'); return; }
+  if(!dueDate){ alert('Indicá para cuándo es el encargo.'); return; }
+  if(!items.length){ alert('Agregá al menos un producto encargado.'); return; }
+
+  SAVING = true;
+  const saveBtn = document.getElementById('ord-save');
+  if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'Guardando...'; }
+  try{
+    let clientId = null;
+    const existing = DATA.clients.find(c => c.name.trim().toLowerCase() === clientName.toLowerCase());
+    if(existing) clientId = existing.id;
+
+    const payload = {
+      client_name: clientName, client_id: clientId, order_date: orderDate, due_date: dueDate, due_time: dueTime || null,
+      total_amount: total, deposit_amount: deposit, deposit_method: depositMethod, remaining_method: remainingMethod,
+      remaining_paid: remainingPaid, notes,
+    };
+    let orderId;
+    if(editing){
+      const { error } = await sb.from('custom_orders').update(payload).eq('id', editing.id);
+      if(error) throw error;
+      orderId = editing.id;
+      const { error: delErr } = await sb.from('custom_order_items').delete().eq('custom_order_id', orderId);
+      if(delErr) throw delErr;
+    } else {
+      const { data, error } = await sb.from('custom_orders').insert({ ...payload, status:'pendiente' }).select().single();
+      if(error) throw error;
+      orderId = data.id;
+    }
+    const rows = items.map(it => {
+      const cat = cats.find(c=>c.id===it.categoryId);
+      return { custom_order_id: orderId, category_id: it.categoryId || null, category_name: cat ? cat.name : '', flavor: it.flavor || '', qty: it.qty };
+    });
+    const { error: itemsErr } = await sb.from('custom_order_items').insert(rows);
+    if(itemsErr) throw itemsErr;
+    await loadAll();
+    closeModal();
+  } catch(e){
+    alert('Error al guardar el encargo: ' + e.message);
+  } finally {
+    SAVING = false;
+  }
 }
 
 /* ===================== CLIENTES ===================== */
@@ -1344,6 +1753,15 @@ function attachTabEvents(){
   document.querySelectorAll('[data-remove-packaging]').forEach(b => b.onclick = () => removePackagingItem(b.dataset.removePackaging));
   document.querySelectorAll('[data-finish-wip]').forEach(b => b.onclick = () => { MODAL = { type:'finishWip', payload: (DATA.workInProgress||[]).find(w=>w.id===b.dataset.finishWip) }; renderModal(); });
   document.querySelectorAll('[data-cancel-wip]').forEach(b => b.onclick = () => cancelWip(b.dataset.cancelWip));
+  document.querySelectorAll('.cat-filter-btn').forEach(b => b.onclick = () => { PRODUCT_CATEGORY_FILTER = b.dataset.cat; render(); });
+  document.querySelectorAll('[data-edit-order]').forEach(b => b.onclick = () => { MODAL = { type:'newOrder', payload: DATA.customOrders.find(o=>o.id===b.dataset.editOrder) }; renderModal(); });
+  document.querySelectorAll('[data-remove-order]').forEach(b => b.onclick = () => removeOrder(b.dataset.removeOrder));
+  document.querySelectorAll('[data-mark-delivered]').forEach(b => b.onclick = () => markOrderDelivered(b.dataset.markDelivered));
+  document.querySelectorAll('[data-mark-paid]').forEach(b => b.onclick = () => markOrderRemainingPaid(b.dataset.markPaid));
+  const ordersToggleBtn = document.getElementById('orders-toggle-delivered');
+  if(ordersToggleBtn) ordersToggleBtn.onclick = () => { ORDERS_SHOW_DELIVERED = !ORDERS_SHOW_DELIVERED; render(); };
+  const notifBtn = document.getElementById('orders-enable-notif');
+  if(notifBtn) notifBtn.onclick = () => { Notification.requestPermission().then(() => render()); };
   const searchEl = document.getElementById('sale-search');
   if(searchEl){ searchEl.oninput = () => { SEARCH_Q = searchEl.value; const main = document.getElementById('main'); main.innerHTML = renderSales(); attachTabEvents(); searchEl.focus(); const v=searchEl.value; searchEl.value=''; searchEl.value=v; }; }
 }
@@ -1369,8 +1787,10 @@ function renderModal(){
   if(MODAL.type==='stockMovement') inner = stockMovementModalHtml();
   if(MODAL.type==='recipeStockMovement') inner = recipeStockMovementModalHtml();
   if(MODAL.type==='finishWip') inner = finishWipModalHtml(MODAL.payload);
+  if(MODAL.type==='newOrder') inner = orderModalHtml(MODAL.payload);
+  if(MODAL.type==='manageCategories') inner = categoryManagerModalHtml();
 
-  const wide = MODAL.type==='newRecipe' || MODAL.type==='newCostProduct';
+  const wide = MODAL.type==='newRecipe' || MODAL.type==='newCostProduct' || MODAL.type==='newOrder';
   host.innerHTML = `<div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-box" style="${wide?'width:560px':''}">${inner}</div></div>`;
   document.getElementById('modal-overlay').onclick = (e) => { if(e.target.id==='modal-overlay') closeModal(); };
   document.getElementById('modal-box').onclick = (e) => e.stopPropagation();
@@ -1389,6 +1809,8 @@ function renderModal(){
   if(MODAL.type==='stockMovement') attachStockMovementModalEvents();
   if(MODAL.type==='recipeStockMovement') attachRecipeStockMovementModalEvents();
   if(MODAL.type==='finishWip') attachFinishWipModalEvents(MODAL.payload);
+  if(MODAL.type==='newOrder') attachOrderModalEvents(MODAL.payload);
+  if(MODAL.type==='manageCategories') attachCategoryManagerModalEvents();
 }
 
 function modalHeader(title){
@@ -1623,13 +2045,19 @@ async function saveSale(){
 /* ---- Producto ---- */
 function productModalHtml(editing){
   return `
-    ${modalHeader(editing?'Editar postre':'Nuevo postre')}
+    ${modalHeader(editing?'Editar producto':'Nuevo producto')}
     <div class="field"><div class="field-label">Nombre</div><input class="input" id="p-name" value="${esc(editing?.name||'')}" placeholder="Ej: Chocotorta"/></div>
     <div style="display:flex;gap:10px">
       <div style="flex:1" class="field"><div class="field-label">Costo</div><input type="number" class="input" id="p-cost" value="${editing?.cost ?? ''}"/></div>
       <div style="flex:1" class="field"><div class="field-label">Precio de venta</div><input type="number" class="input" id="p-price" value="${editing?.price ?? ''}"/></div>
     </div>
-    <div class="field"><div class="field-label">¿De quién es este postre?</div>
+    <div class="field"><div class="field-label">Categoría</div>
+      <select class="input" id="p-category">
+        <option value="">Sin categoría</option>
+        ${DATA.productCategories.map(c=>`<option value="${c.id}" ${editing?.categoryId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><div class="field-label">¿De quién es este producto?</div>
       <select class="input" id="p-owner">${DATA.owners.map(o=>`<option value="${o.id}" ${editing?.ownerId===o.id?'selected':''}>${esc(o.name)}</option>`).join('')}</select>
     </div>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:14px;font-weight:600">
@@ -1668,7 +2096,8 @@ function attachProductModalEvents(editing){
     const stock = +document.getElementById('p-stock').value || 0;
     const lowStockAlert = +document.getElementById('p-lowstock').value || 0;
     const costProductId = document.getElementById('p-costproduct').value || null;
-    const payload = { name, cost, price, owner_id: ownerId, track_stock: trackStock, stock, low_stock_alert: lowStockAlert, cost_product_id: costProductId };
+    const categoryId = document.getElementById('p-category').value || null;
+    const payload = { name, cost, price, owner_id: ownerId, track_stock: trackStock, stock, low_stock_alert: lowStockAlert, cost_product_id: costProductId, category_id: categoryId };
     const { error } = editing
       ? await sb.from('products').update(payload).eq('id', editing.id)
       : await sb.from('products').insert(payload);
