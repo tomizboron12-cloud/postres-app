@@ -1221,17 +1221,25 @@ function renderOrderModalBody(editing){
 
     <div class="field-label" style="margin:10px 0 6px">Qué encargó</div>
     <div id="ord-items">
-      ${ORDER_ITEMS.map((row,i) => `
+      ${ORDER_ITEMS.map((row,i) => {
+        const productsInCat = row.categoryId ? DATA.products.filter(p=>p.categoryId===row.categoryId) : [];
+        const isCustom = row.customFlavor || (row.flavor && !productsInCat.some(p=>p.name===row.flavor));
+        return `
         <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
           <select class="input ord-item-cat" data-idx="${i}" style="flex:1.3;min-width:120px">
             <option value="">Tipo de producto...</option>
             ${cats.map(c=>`<option value="${c.id}" ${c.id===row.categoryId?'selected':''}>${esc(c.name)}</option>`).join('')}
           </select>
-          <input class="input ord-item-flavor" data-idx="${i}" value="${esc(row.flavor||'')}" placeholder="Sabor / variante" style="flex:1.3;min-width:110px"/>
+          <select class="input ord-item-flavor" data-idx="${i}" style="flex:1.3;min-width:110px" ${!row.categoryId?'disabled':''}>
+            <option value="">${row.categoryId ? (productsInCat.length ? 'Elegí sabor...' : 'Sin productos en esta categoría') : 'Elegí el tipo primero'}</option>
+            ${productsInCat.map(p=>`<option value="${esc(p.name)}" ${!isCustom && p.name===row.flavor?'selected':''}>${esc(p.name)}</option>`).join('')}
+            ${row.categoryId ? `<option value="__custom__" ${isCustom?'selected':''}>Otro (escribir)...</option>` : ''}
+          </select>
           <input type="number" min="1" step="any" class="input ord-item-qty" data-idx="${i}" value="${row.qty}" style="width:64px" placeholder="cant."/>
           ${ORDER_ITEMS.length>1 ? `<button class="btn-icon ord-item-remove" data-idx="${i}">${ICONS.trash.replace('currentColor', COLORS.frutillaDark)}</button>` : ''}
         </div>
-      `).join('')}
+        ${isCustom ? `<div style="margin:-4px 0 8px"><input class="input ord-item-flavor-custom" data-idx="${i}" value="${esc(row.flavor||'')}" placeholder="Escribí el sabor / variante" style="max-width:260px"/></div>` : ''}
+      `;}).join('')}
     </div>
     <button class="btn btn-ghost" id="ord-add-row" style="margin-bottom:14px">${ICONS.plus} Agregar producto</button>
 
@@ -1277,8 +1285,20 @@ function renderOrderModalBody(editing){
 function attachOrderModalEvents(editing){
   document.getElementById('modal-cancel').onclick = closeModal;
   document.getElementById('ord-add-row').onclick = () => { ORDER_ITEMS.push({categoryId:'', flavor:'', qty:1}); refreshOrderModal(editing); };
-  document.querySelectorAll('.ord-item-cat').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].categoryId = el.value; refreshOrderModal(editing); });
-  document.querySelectorAll('.ord-item-flavor').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].flavor = el.value; refreshOrderModal(editing); });
+  document.querySelectorAll('.ord-item-cat').forEach(el => el.onchange = () => {
+    const idx = +el.dataset.idx;
+    ORDER_ITEMS[idx].categoryId = el.value;
+    ORDER_ITEMS[idx].flavor = '';
+    ORDER_ITEMS[idx].customFlavor = false;
+    refreshOrderModal(editing);
+  });
+  document.querySelectorAll('.ord-item-flavor').forEach(el => el.onchange = () => {
+    const idx = +el.dataset.idx;
+    if(el.value === '__custom__'){ ORDER_ITEMS[idx].customFlavor = true; ORDER_ITEMS[idx].flavor = ''; }
+    else { ORDER_ITEMS[idx].customFlavor = false; ORDER_ITEMS[idx].flavor = el.value; }
+    refreshOrderModal(editing);
+  });
+  document.querySelectorAll('.ord-item-flavor-custom').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].flavor = el.value; refreshOrderModal(editing); });
   document.querySelectorAll('.ord-item-qty').forEach(el => el.onchange = () => { ORDER_ITEMS[+el.dataset.idx].qty = +el.value || 1; refreshOrderModal(editing); });
   document.querySelectorAll('.ord-item-remove').forEach(el => el.onclick = () => { ORDER_ITEMS.splice(+el.dataset.idx,1); refreshOrderModal(editing); });
   document.getElementById('ord-total').onchange = () => { ORDER_TOTAL = +document.getElementById('ord-total').value || 0; refreshOrderModal(editing); };
@@ -2054,7 +2074,7 @@ function productModalHtml(editing){
     <div class="field"><div class="field-label">Categoría</div>
       <select class="input" id="p-category">
         <option value="">Sin categoría</option>
-        ${DATA.productCategories.map(c=>`<option value="${c.id}" ${editing?.categoryId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
+        ${DATA.productCategories.map(c=>`<option value="${c.id}" ${(editing ? editing.categoryId===c.id : PRODUCT_CATEGORY_FILTER===c.id)?'selected':''}>${esc(c.name)}</option>`).join('')}
       </select>
     </div>
     <div class="field"><div class="field-label">¿De quién es este producto?</div>
@@ -2102,8 +2122,10 @@ function attachProductModalEvents(editing){
       ? await sb.from('products').update(payload).eq('id', editing.id)
       : await sb.from('products').insert(payload);
     if(error){ alert('Error al guardar: ' + error.message); return; }
+    PRODUCT_CATEGORY_FILTER = categoryId || 'all';
     await loadAll();
     closeModal();
+    render();
   };
 }
 
